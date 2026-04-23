@@ -541,6 +541,10 @@ async def handle_admin_text(update: Update, session: Dict[str, object], payload,
             set_session(uid, screen="admin_add_sheikh_name", page=0)
             await reply(update, "اكتب اسم الشيخ الجديد. يمكنك كتابة أكثر من اسم في سطر واحد أو عدة أسطر.")
             return
+        if text == "حذف شيخ":
+            set_session(uid, screen="admin_remove_sheikh_name", page=0)
+            await reply(update, "اكتب اسم الشيخ المراد حذفه. يمكنك كتابة أكثر من اسم في سطر واحد أو عدة أسطر.")
+            return
         if text == "الإحصائيات":
             stats = storage.stats(payload)
             await reply(
@@ -916,6 +920,20 @@ async def handle_admin_text(update: Update, session: Dict[str, object], payload,
             await reply(update, "تم إضافة الشيوخ التالية أسماؤهم:\n" + "\n".join(added), admin_dashboard())
         else:
             await reply(update, "كل الأسماء موجودة بالفعل", admin_dashboard())
+        return
+
+    if screen == "admin_remove_sheikh_name":
+        names = [n.strip() for n in re.split(r"[\n,؛]+", text) if n.strip()]
+        if not names:
+            await reply(update, "اكتب اسمًا واحدًا على الأقل")
+            return
+        removed = storage.remove_sheikh_names(payload, names)
+        storage.save(payload)
+        set_session(uid, screen="admin_dashboard", page=0)
+        if removed:
+            await reply(update, "تم حذف الشيوخ التالية أسماؤهم:\n" + "\n".join(removed), admin_dashboard())
+        else:
+            await reply(update, "لم يتم العثور على الأسماء", admin_dashboard())
         return
 
     await reply(update, "اختر من القائمة", admin_dashboard())

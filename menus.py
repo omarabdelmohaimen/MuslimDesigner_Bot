@@ -33,7 +33,7 @@ def category_menu(category: str) -> ReplyKeyboardMarkup:
 def admin_dashboard() -> ReplyKeyboardMarkup:
     return _kb([
         ["إضافة محتوى", "حذف محتوى"],
-        ["إضافة شيخ جديد"],
+        ["إضافة شيخ جديد", "حذف شيخ"],
         ["الإحصائيات"],
         ["الرئيسية"],
     ])

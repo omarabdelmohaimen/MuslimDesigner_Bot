@@ -372,3 +372,24 @@ class Storage:
             existing.add(name)
             added.append(name)
         return added
+
+    def remove_sheikh_names(self, data: Dict[str, Any], names: List[str]) -> List[str]:
+        current = data["settings"]["default_sheikhs"]
+        removed: List[str] = []
+        targets = {name.strip() for name in names if name.strip()}
+        if not targets:
+            return removed
+        # Remove from default list
+        data["settings"]["default_sheikhs"] = [name for name in current if name not in targets]
+        # Remove any stored content and visible entries from categories
+        for cat in ("chroma", "designs"):
+            sheikhs = data["categories"].get(cat, {}).get("sheikhs", {})
+            for name in list(sheikhs.keys()):
+                if name in targets:
+                    sheikhs.pop(name, None)
+                    removed.append(name)
+        # Make sure all requested names are reported, even if they only existed in defaults
+        for name in targets:
+            if name not in removed and name in current:
+                removed.append(name)
+        return removed
