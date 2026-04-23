@@ -56,6 +56,13 @@ def admin_type_menu(action: str, category: str) -> ReplyKeyboardMarkup:
     ])
 
 
+def sheikh_mode_menu() -> ReplyKeyboardMarkup:
+    return _kb([
+        ["سور", "عشوائي"],
+        ["رجوع", "الرئيسية"],
+    ])
+
+
 def paginate(items: Sequence[str], page: int, per_page: int):
     total_pages = max(1, ceil(len(items) / per_page))
     page = max(0, min(page, total_pages - 1))

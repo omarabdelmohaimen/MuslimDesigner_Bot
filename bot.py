@@ -15,6 +15,7 @@ from menus import (
     admin_category_menu,
     admin_dashboard,
     admin_type_menu,
+    sheikh_mode_menu,
     category_menu,
     clear_confirm_menu,
     items_menu,
@@ -220,12 +221,57 @@ async def handle_back(update: Update, session: Dict[str, object], payload):
             set_session(uid, screen=f"admin_{action}_type", page=0)
             await reply(update, "اختر النوع", admin_type_menu(action, category))
             return
-        if screen == "admin_add_sheikh_surah":
+        if screen == "admin_add_sheikh_mode":
             category = str(session.get("category", "chroma"))
-            set_session(uid, screen="admin_add_targets", page=0, subtarget_name=None)
+            sheikh = str(session.get("target_name", ""))
+            set_session(uid, screen="admin_add_targets", page=0, target_name=None, subtarget_name=None)
             await show_targets_screen(update, session, payload, "اختر الشيخ", current_targets("sheikhs", payload), "admin_add_targets", category, "sheikhs")
             return
+        if screen == "admin_add_sheikh_surah":
+            category = str(session.get("category", "chroma"))
+            sheikh = str(session.get("target_name", ""))
+            set_session(uid, screen="admin_add_sheikh_mode", page=0, target_name=sheikh)
+            await reply(update, "اختر طريقة الإضافة", sheikh_mode_menu())
+            return
         if screen in {"admin_upload_target", "admin_upload_nature"}:
+            previous = str(session.get("return_screen", "admin_dashboard"))
+            if previous == "admin_add_sheikh_mode":
+                category = str(session.get("category", "chroma"))
+                set_session(uid, screen="admin_add_sheikh_mode", page=0)
+                await reply(update, "اختر طريقة الإضافة", sheikh_mode_menu())
+                return
+            if previous == "admin_add_sheikh_surah":
+                category = str(session.get("category", "chroma"))
+                sheikh = str(session.get("target_name", ""))
+                set_session(uid, screen="admin_add_sheikh_mode", page=0, target_name=sheikh)
+                await reply(update, "اختر طريقة الإضافة", sheikh_mode_menu())
+                return
+            if previous == "admin_add_targets":
+                action = str(session.get("action", "add"))
+                category = str(session.get("category", "chroma"))
+                set_session(uid, screen="admin_add_type", page=0)
+                await reply(update, "اختر النوع", admin_type_menu(action, category))
+                return
+            if previous == "admin_add_category":
+                set_session(uid, screen="admin_add_category", page=0)
+                await reply(update, "اختر القسم للإضافة", admin_category_menu("add"))
+                return
+            if previous == "admin_del_items":
+                category = str(session.get("category", "chroma"))
+                content_type = session.get("content_type")
+                target_name = session.get("target_name")
+                subtarget_name = session.get("subtarget_name")
+                items = current_items(payload, category, content_type, target_name, subtarget_name)
+                markup, page, total_pages, _indices = items_menu(len(items), int(session.get("page", 0)), payload["settings"]["item_page_size"])
+                session["page"] = page
+                await reply(update, "أعد الإرسال أو اضغط تم", markup)
+                return
+            if previous == "admin_del_nature_items":
+                items = payload["categories"]["nature"]
+                markup, page, total_pages, _indices = items_menu(len(items), int(session.get("page", 0)), payload["settings"]["item_page_size"])
+                session["page"] = page
+                await reply(update, "أعد الإرسال أو اضغط تم", markup)
+                return
             set_session(uid, screen="admin_dashboard", page=0)
             await reply(update, "لوحة التحكم", admin_dashboard())
             return
@@ -553,17 +599,28 @@ async def handle_admin_text(update: Update, session: Dict[str, object], payload,
             return
         if text in targets:
             if content_type == "surahs":
-                set_session(uid, target_name=text, subtarget_name=None, screen="admin_upload_target", mode="upload")
+                set_session(uid, target_name=text, subtarget_name=None, screen="admin_upload_target", mode="upload", return_screen="admin_add_targets")
                 await reply(update, f"أرسل المحتوى الآن لـ {text}. يمكنك إرسال صورة أو فيديو أو ملف أكثر من مرة.", upload_menu())
                 return
-            set_session(uid, target_name=text, subtarget_name=None, screen="admin_add_sheikh_surah", page=0)
-            await show_targets_screen(update, session, payload, f"{text} - اختر السورة", SURAHS, "admin_add_sheikh_surah", category, "sheikhs", extra={"target_name": text})
+            set_session(uid, target_name=text, subtarget_name=None, screen="admin_add_sheikh_mode", page=0)
+            await reply(update, "اختر طريقة الإضافة", sheikh_mode_menu())
+            return
+
+    if screen == "admin_add_sheikh_mode":
+        category = str(session.get("category", "chroma"))
+        sheikh = str(session.get("target_name", ""))
+        if text == "سور":
+            set_session(uid, screen="admin_add_sheikh_surah", page=0, return_screen="admin_add_sheikh_mode")
+            await show_targets_screen(update, session, payload, f"{sheikh} - اختر السورة", SURAHS, "admin_add_sheikh_surah", category, "sheikhs", extra={"target_name": sheikh})
+            return
+        if text == "عشوائي":
+            set_session(uid, subtarget_name="عشوائي", screen="admin_upload_target", mode="upload", return_screen="admin_add_sheikh_mode")
+            await reply(update, f"أرسل المحتوى الآن لـ {sheikh} / عشوائي. يمكنك إرسال صورة أو فيديو أو ملف أكثر من مرة.", upload_menu())
             return
 
     if screen == "admin_add_sheikh_surah":
         category = str(session.get("category", "chroma"))
         sheikh = str(session.get("target_name", ""))
-        surahs = list(session.get("targets", SURAHS))
         page = int(session.get("page", 0))
         page_size = payload["settings"]["page_size"]
 
@@ -577,16 +634,49 @@ async def handle_admin_text(update: Update, session: Dict[str, object], payload,
             await show_targets_screen(update, session, payload, f"{sheikh} - اختر السورة", SURAHS, "admin_add_sheikh_surah", category, "sheikhs", extra={"target_name": sheikh})
             return
         if text in SURAHS:
-            set_session(uid, subtarget_name=text, screen="admin_upload_target", mode="upload")
+            set_session(uid, subtarget_name=text, screen="admin_upload_target", mode="upload", return_screen="admin_add_sheikh_surah")
             await reply(update, f"أرسل المحتوى الآن لـ {sheikh} / {text}. يمكنك إرسال صورة أو فيديو أو ملف أكثر من مرة.", upload_menu())
             return
 
     if screen in {"admin_upload_target", "admin_upload_nature"}:
         if text == "إلغاء":
-            clear_session(uid)
+            previous = str(session.get("return_screen", "admin_dashboard"))
+            if previous == "admin_add_sheikh_surah":
+                sheikh = str(session.get("target_name", ""))
+                set_session(uid, screen="admin_add_sheikh_mode", page=0)
+                await reply(update, "اختر طريقة الإضافة", sheikh_mode_menu())
+                return
+            if previous == "admin_add_sheikh_mode":
+                sheikh = str(session.get("target_name", ""))
+                set_session(uid, screen="admin_add_sheikh_mode", page=0)
+                await reply(update, "اختر طريقة الإضافة", sheikh_mode_menu())
+                return
+            if previous == "admin_add_targets":
+                action = str(session.get("action", "add"))
+                category = str(session.get("category", "chroma"))
+                set_session(uid, screen="admin_add_type", page=0)
+                await reply(update, "اختر النوع", admin_type_menu(action, category))
+                return
+            set_session(uid, screen="admin_dashboard", page=0)
             await reply(update, "تم الإلغاء", admin_dashboard())
             return
         if text == "تم":
+            previous = str(session.get("return_screen", "admin_dashboard"))
+            if previous == "admin_add_sheikh_surah":
+                sheikh = str(session.get("target_name", ""))
+                set_session(uid, screen="admin_add_sheikh_mode", page=0)
+                await reply(update, "تم حفظ المحتوى", sheikh_mode_menu())
+                return
+            if previous == "admin_add_sheikh_mode":
+                set_session(uid, screen="admin_add_sheikh_mode", page=0)
+                await reply(update, "تم حفظ المحتوى", sheikh_mode_menu())
+                return
+            if previous == "admin_add_targets":
+                action = str(session.get("action", "add"))
+                category = str(session.get("category", "chroma"))
+                set_session(uid, screen="admin_add_type", page=0)
+                await reply(update, "تم حفظ المحتوى", admin_type_menu(action, category))
+                return
             set_session(uid, screen="admin_dashboard", page=0)
             await reply(update, "تم حفظ المحتوى", admin_dashboard())
             return

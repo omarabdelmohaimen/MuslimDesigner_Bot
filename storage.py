@@ -132,7 +132,8 @@ class Storage:
             json.dump(data, f, ensure_ascii=False, indent=2)
 
     def _available_surahs(self, data: Dict[str, Any], category: str) -> List[str]:
-        return [s for s, items in data["categories"].get(category, {}).get("surahs", {}).items() if items]
+        keys = set(data["categories"].get(category, {}).get("surahs", {}).keys())
+        return [s for s in SURAHS if s in keys]
 
     def _available_sheikhs(self, data: Dict[str, Any], category: str) -> List[str]:
         out: List[str] = []
@@ -165,7 +166,14 @@ class Storage:
         surah_map = data["categories"].get(category, {}).get("sheikhs", {}).get(sheikh_name, {})
         if not isinstance(surah_map, dict):
             return []
-        return [surah for surah, items in surah_map.items() if items]
+        out: List[str] = []
+        if any(surah_map.get(k, []) for k in ("عشوائي", "عام")):
+            out.append("عشوائي")
+        keys = set(surah_map.keys())
+        for surah in SURAHS:
+            if surah in keys and surah_map.get(surah):
+                out.append(surah)
+        return out
 
     def get_items(
         self,
@@ -188,10 +196,23 @@ class Storage:
             if not isinstance(sheikh_map, dict):
                 return []
             if subtarget_name:
-                return sheikh_map.get(subtarget_name, [])
-            # merge all surah buckets for legacy display
+                if subtarget_name in sheikh_map:
+                    return sheikh_map.get(subtarget_name, [])
+                if subtarget_name == "عشوائي" and "عام" in sheikh_map:
+                    return sheikh_map.get("عام", [])
+                return []
             merged: List[Dict[str, Any]] = []
-            for items in sheikh_map.values():
+            if sheikh_map.get("عشوائي"):
+                merged.extend(sheikh_map.get("عشوائي", []))
+            elif sheikh_map.get("عام"):
+                merged.extend(sheikh_map.get("عام", []))
+            for surah in SURAHS:
+                items = sheikh_map.get(surah, [])
+                if items:
+                    merged.extend(items)
+            for key, items in sheikh_map.items():
+                if key in SURAHS or key in {"عشوائي", "عام"}:
+                    continue
                 merged.extend(items)
             return merged
         return []
@@ -215,7 +236,7 @@ class Storage:
             sheikhs = data["categories"][category]["sheikhs"]
             sheikh_bucket = sheikhs.setdefault(target_name, {})
             if subtarget_name is None:
-                subtarget_name = "عام"
+                subtarget_name = "عشوائي"
             sheikh_bucket[subtarget_name] = items
 
     def add_item(
@@ -242,10 +263,10 @@ class Storage:
                 return
             sheikh_bucket = data["categories"][category]["sheikhs"].setdefault(target_name, {})
             if not isinstance(sheikh_bucket, dict):
-                sheikh_bucket = {"عام": []}
+                sheikh_bucket = {"عشوائي": []}
                 data["categories"][category]["sheikhs"][target_name] = sheikh_bucket
             if subtarget_name is None:
-                subtarget_name = "عام"
+                subtarget_name = "عشوائي"
             sheikh_bucket.setdefault(subtarget_name, []).append(item)
 
     def remove_item(
