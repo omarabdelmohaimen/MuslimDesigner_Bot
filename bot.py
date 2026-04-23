@@ -1,1029 +1,529 @@
-from __future__ import annotations
-
-import logging
 import os
 import re
-import unicodedata
-from pathlib import Path
-from typing import Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional
 
 from dotenv import load_dotenv
-from telegram import Update
-from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
-
-from menus import (
-    admin_category_menu,
-    admin_dashboard,
-    admin_type_menu,
-    sheikh_mode_menu,
-    category_menu,
-    clear_confirm_menu,
-    items_menu,
-    main_menu,
-    targets_menu,
-    upload_menu,
+from supabase import create_client, Client
+from telegram import (
+    Update,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    ReplyKeyboardMarkup,
+    ReplyKeyboardRemove,
 )
-from storage import SURAHS, Storage
+from telegram.ext import (
+    Application,
+    CallbackQueryHandler,
+    CommandHandler,
+    ContextTypes,
+    MessageHandler,
+    filters,
+)
 
 load_dotenv()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0") or 0)
-DATA_FILE = Path("data/content.json")
+SUPABASE_URL = os.getenv("SUPABASE_URL", "").strip()
+SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "").strip()
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
-)
-logger = logging.getLogger("quran_media_bot")
+SURAH_LIST = [
+    ("الفاتحة", 1), ("البقرة", 2), ("آل عمران", 3), ("النساء", 4), ("المائدة", 5), ("الأنعام", 6),
+    ("الأعراف", 7), ("الأنفال", 8), ("التوبة", 9), ("يونس", 10), ("هود", 11), ("يوسف", 12),
+    ("الرعد", 13), ("إبراهيم", 14), ("الحجر", 15), ("النحل", 16), ("الإسراء", 17), ("الكهف", 18),
+    ("مريم", 19), ("طه", 20), ("الأنبياء", 21), ("الحج", 22), ("المؤمنون", 23), ("النور", 24),
+    ("الفرقان", 25), ("الشعراء", 26), ("النمل", 27), ("القصص", 28), ("العنكبوت", 29), ("الروم", 30),
+    ("لقمان", 31), ("السجدة", 32), ("الأحزاب", 33), ("سبأ", 34), ("فاطر", 35), ("يس", 36),
+    ("الصافات", 37), ("ص", 38), ("الزمر", 39), ("غافر", 40), ("فصلت", 41), ("الشورى", 42),
+    ("الزخرف", 43), ("الدخان", 44), ("الجاثية", 45), ("الأحقاف", 46), ("محمد", 47), ("الفتح", 48),
+    ("الحجرات", 49), ("ق", 50), ("الذاريات", 51), ("الطور", 52), ("النجم", 53), ("القمر", 54),
+    ("الرحمن", 55), ("الواقعة", 56), ("الحديد", 57), ("المجادلة", 58), ("الحشر", 59), ("الممتحنة", 60),
+    ("الصف", 61), ("الجمعة", 62), ("المنافقون", 63), ("التغابن", 64), ("الطلاق", 65), ("التحريم", 66),
+    ("الملك", 67), ("القلم", 68), ("الحاقة", 69), ("المعارج", 70), ("نوح", 71), ("الجن", 72),
+    ("المزمل", 73), ("المدثر", 74), ("القيامة", 75), ("الإنسان", 76), ("المرسلات", 77), ("النبأ", 78),
+    ("النازعات", 79), ("عبس", 80), ("التكوير", 81), ("الانفطار", 82), ("المطففين", 83), ("الانشقاق", 84),
+    ("البروج", 85), ("الطارق", 86), ("الأعلى", 87), ("الغاشية", 88), ("الفجر", 89), ("البلد", 90),
+    ("الشمس", 91), ("الليل", 92), ("الضحى", 93), ("الشرح", 94), ("التين", 95), ("العلق", 96),
+    ("القدر", 97), ("البينة", 98), ("الزلزلة", 99), ("العاديات", 100), ("القارعة", 101), ("التكاثر", 102),
+    ("العصر", 103), ("الهمزة", 104), ("الفيل", 105), ("قريش", 106), ("الماعون", 107), ("الكوثر", 108),
+    ("الكافرون", 109), ("النصر", 110), ("المسد", 111), ("الإخلاص", 112), ("الفلق", 113), ("الناس", 114),
+]
 
-storage = Storage(DATA_FILE)
-SESSIONS: Dict[int, Dict[str, object]] = {}
+if not BOT_TOKEN or not ADMIN_ID or not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
+    raise RuntimeError("Missing env vars: BOT_TOKEN, ADMIN_ID, SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY")
 
+sb: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+state: Dict[int, Dict[str, Any]] = {}
 
-def is_admin(user_id: int) -> bool:
-    return bool(ADMIN_ID) and user_id == ADMIN_ID
+# ---------- DB bootstrap ----------
 
-
-def get_session(user_id: int) -> Dict[str, object]:
-    session = SESSIONS.setdefault(user_id, {})
-    session.setdefault("role", "user")
-    session.setdefault("screen", "home")
-    session.setdefault("page", 0)
-    return session
-
-
-def set_session(user_id: int, **kwargs) -> Dict[str, object]:
-    session = get_session(user_id)
-    session.update(kwargs)
-    return session
-
-
-def clear_session(user_id: int) -> None:
-    SESSIONS.pop(user_id, None)
-
-
-def page_text(title: str, page: int, total_pages: int) -> str:
-    return f"{title}\nالصفحة {page + 1}/{total_pages}"
-
-
-def normalize_text(text: str) -> str:
-    text = unicodedata.normalize("NFKD", text)
-    text = "".join(ch for ch in text if not unicodedata.combining(ch))
-    text = text.replace("أ", "ا").replace("إ", "ا").replace("آ", "ا")
-    text = text.replace("ى", "ي").replace("ؤ", "و").replace("ئ", "ي")
-    text = text.replace("ة", "ه")
-    text = re.sub(r"[\u064B-\u065F\u0670\u0640]", "", text)
-    return re.sub(r"\s+", " ", text).strip().lower()
-
-
-def find_surahs(query: str, available: Optional[Sequence[str]] = None) -> List[str]:
-    q = normalize_text(query)
-    if not q:
-        return []
-    source = list(available) if available is not None else SURAHS
-    exact = [s for s in source if normalize_text(s) == q]
-    if exact:
-        return exact
-    return [s for s in source if q in normalize_text(s)]
-
-
-async def send_item(message, item):
-    media_type = item.get("media_type", "photo")
-    file_id = item.get("file_id")
-    caption = item.get("caption") or None
-    if not file_id:
+def seed_surahs_if_needed() -> None:
+    try:
+        first = sb.table("surahs").select("id").limit(1).execute().data or []
+    except Exception as exc:
+        raise RuntimeError("Supabase tables are missing. Run supabase_schema.sql first.") from exc
+    if first:
         return
-    if media_type == "video":
+    payload = [{"id": sid, "name": name} for name, sid in SURAH_LIST]
+    sb.table("surahs").insert(payload).execute()
+
+def _fetch(table: str, select: str = "*", **filters):
+    q = sb.table(table).select(select)
+    for k, v in filters.items():
+        if v is None:
+            continue
+        q = q.eq(k, v)
+    return q.execute().data or []
+
+def _fetch_one(table: str, select: str = "*", **filters):
+    rows = _fetch(table, select, **filters)
+    return rows[0] if rows else None
+
+def _insert(table: str, payload: Dict[str, Any]) -> None:
+    sb.table(table).insert(payload).execute()
+
+# ---------- keyboards ----------
+
+def main_menu() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        [["كرومات", "تصاميم"], ["مناظر طبيعية", "بحث في السور"]],
+        resize_keyboard=True,
+        input_field_placeholder="اختر من القائمة",
+    )
+
+def admin_menu() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        [["إضافة محتوى", "إضافة شيخ"], ["حذف شيخ", "إحصائيات"], ["رجوع"]],
+        resize_keyboard=True,
+        input_field_placeholder="لوحة التحكم",
+    )
+
+def upload_menu() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup([["إنهاء"], ["رجوع"]], resize_keyboard=True)
+
+def section_inline(section: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("سور", callback_data=f"browse|{section}|surah|0")],
+        [InlineKeyboardButton("شيوخ", callback_data=f"browse|{section}|sheikh|0")],
+        [InlineKeyboardButton("عشوائي", callback_data=f"browse|{section}|random|0")],
+        [InlineKeyboardButton("رجوع", callback_data="back|home")],
+    ])
+
+def admin_sections_inline() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("كرومات", callback_data="admin|section|chroma")],
+        [InlineKeyboardButton("تصاميم", callback_data="admin|section|designs")],
+        [InlineKeyboardButton("مناظر طبيعية", callback_data="admin|section|nature")],
+        [InlineKeyboardButton("رجوع", callback_data="back|admin")],
+    ])
+
+def admin_type_inline(section: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("سور", callback_data=f"admin|type|{section}|surah")],
+        [InlineKeyboardButton("شيوخ", callback_data=f"admin|type|{section}|sheikh")],
+        [InlineKeyboardButton("عشوائي", callback_data=f"admin|type|{section}|random")],
+        [InlineKeyboardButton("رجوع", callback_data="back|admin_sections")],
+    ])
+
+def make_paged_keyboard(items: List[Dict[str, Any]], item_prefix: str, page_prefix: str, page: int, back_cb: str, per_page: int = 9) -> InlineKeyboardMarkup:
+    start = page * per_page
+    end = start + per_page
+    page_items = items[start:end]
+    rows = []
+    for item in page_items:
+        rows.append([InlineKeyboardButton(item["label"], callback_data=f"sel|{item_prefix}|{item['id']}")])
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton("السابق", callback_data=f"page|{page_prefix}|{page-1}"))
+    if end < len(items):
+        nav.append(InlineKeyboardButton("التالي", callback_data=f"page|{page_prefix}|{page+1}"))
+    if nav:
+        rows.append(nav)
+    rows.append([InlineKeyboardButton("رجوع", callback_data=back_cb)])
+    return InlineKeyboardMarkup(rows)
+
+# ---------- item queries ----------
+
+def all_surah_items() -> List[Dict[str, Any]]:
+    rows = _fetch("surahs", "id,name")
+    return [{"id": r["id"], "label": f"{r['id']}. {r['name']}"} for r in rows]
+
+def all_sheikh_items() -> List[Dict[str, Any]]:
+    rows = _fetch("sheikhs", "id,name")
+    return [{"id": r["id"], "label": r["name"]} for r in rows]
+
+def available_surah_items(section: str) -> List[Dict[str, Any]]:
+    media = _fetch("media", "surah_id", section=section, category="surah")
+    ids = sorted({m["surah_id"] for m in media if m.get("surah_id") is not None})
+    rows = _fetch("surahs", "id,name")
+    lookup = {r["id"]: r["name"] for r in rows}
+    return [{"id": sid, "label": f"{sid}. {lookup[sid]}"} for sid in ids if sid in lookup]
+
+def available_sheikh_items(section: str) -> List[Dict[str, Any]]:
+    media = _fetch("media", "sheikh_id", section=section, category="sheikh")
+    ids = sorted({m["sheikh_id"] for m in media if m.get("sheikh_id") is not None})
+    rows = _fetch("sheikhs", "id,name")
+    lookup = {r["id"]: r["name"] for r in rows}
+    return [{"id": sid, "label": lookup[sid]} for sid in ids if sid in lookup]
+
+def get_media(section: str, category: str, item_id: Optional[int] = None) -> List[Dict[str, Any]]:
+    q = sb.table("media").select("file_id,file_kind")
+    q = q.eq("section", section).eq("category", category)
+    if category == "surah" and item_id is not None:
+        q = q.eq("surah_id", item_id)
+    elif category == "sheikh" and item_id is not None:
+        q = q.eq("sheikh_id", item_id)
+    return q.order("id").execute().data or []
+
+def add_media(section: str, category: str, file_id: str, file_kind: str, item_id: Optional[int] = None) -> None:
+    payload: Dict[str, Any] = {
+        "section": section,
+        "category": category,
+        "file_id": file_id,
+        "file_kind": file_kind,
+        "caption": None,
+    }
+    if category == "surah":
+        payload["surah_id"] = item_id
+    elif category == "sheikh":
+        payload["sheikh_id"] = item_id
+    _insert("media", payload)
+
+def delete_sheikh(sheikh_id: int) -> None:
+    sb.table("media").delete().eq("sheikh_id", sheikh_id).execute()
+    sb.table("sheikhs").delete().eq("id", sheikh_id).execute()
+
+# ---------- sending media ----------
+
+async def send_item_media(message, media_row: Dict[str, Any], caption: Optional[str] = None):
+    kind = media_row["file_kind"]
+    file_id = media_row["file_id"]
+    if kind == "photo":
+        await message.reply_photo(file_id, caption=caption)
+    elif kind == "video":
         await message.reply_video(file_id, caption=caption)
-    elif media_type == "document":
+    elif kind == "document":
         await message.reply_document(file_id, caption=caption)
     else:
-        await message.reply_photo(file_id, caption=caption)
+        await message.reply_text(caption or "نوع ملف غير مدعوم")
 
-
-async def reply(update: Update, text: str, markup=None):
-    await update.message.reply_text(text, reply_markup=markup)
-
-
-async def show_main_menu(update: Update, text: str = "الصفحة الرئيسية"):
-    uid = update.effective_user.id
-    set_session(uid, role="user", screen="home", page=0, category=None, content_type=None, target_name=None, subtarget_name=None)
-    await reply(update, text, main_menu())
-
+# ---------- commands ----------
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await show_main_menu(update, "أهلا بك في بوت القرآن")
-
+    state.pop(update.effective_user.id, None)
+    await update.message.reply_text("أهلا بك", reply_markup=main_menu())
 
 async def admin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id):
-        await reply(update, "غير مسموح")
+    if update.effective_user.id != ADMIN_ID:
         return
-    set_session(update.effective_user.id, role="admin", screen="admin_dashboard", page=0)
-    await reply(update, "لوحة التحكم", admin_dashboard())
+    state[ADMIN_ID] = {"mode": "admin_home"}
+    await update.message.reply_text("لوحة التحكم", reply_markup=admin_menu())
 
+# ---------- text router ----------
 
-def current_targets(content_type: str, payload, *, category: Optional[str] = None, available_only: bool = False) -> list[str]:
-    return storage.get_targets(content_type, payload, category=category, available_only=available_only)
-
-
-def current_items(payload, category: str, content_type: Optional[str], target_name: Optional[str], subtarget_name: Optional[str] = None) -> list[dict]:
-    return storage.get_items(payload, category, content_type, target_name, subtarget_name)
-
-
-def available_surahs_for_category(payload, category: str) -> list[str]:
-    return current_targets("surahs", payload, category=category, available_only=True)
-
-
-def available_sheikhs_for_category(payload, category: str) -> list[str]:
-    return current_targets("sheikhs", payload, category=category, available_only=True)
-
-
-async def show_targets_screen(
-    update: Update,
-    session: Dict[str, object],
-    payload,
-    title: str,
-    targets: Sequence[str],
-    screen: str,
-    category: Optional[str] = None,
-    content_type: Optional[str] = None,
-    extra: Optional[dict] = None,
-):
-    page = int(session.get("page", 0))
-    markup, page, total_pages, chunk = targets_menu(
-        items=targets,
-        page=page,
-        per_page=payload["settings"]["page_size"],
-    )
-    session["page"] = page
-    session["screen"] = screen
-    session["targets"] = list(targets)
-    if category is not None:
-        session["category"] = category
-    if content_type is not None:
-        session["content_type"] = content_type
-    if extra:
-        session.update(extra)
-    await reply(update, page_text(title, page, total_pages), markup)
-
-
-async def show_items_screen(
-    update: Update,
-    session: Dict[str, object],
-    payload,
-    title: str,
-    category: str,
-    content_type: Optional[str],
-    target_name: Optional[str],
-    subtarget_name: Optional[str],
-    screen: str,
-):
-    items = current_items(payload, category, content_type, target_name, subtarget_name)
-    page = int(session.get("page", 0))
-    markup, page, total_pages, _indices = items_menu(
-        items_count=len(items),
-        page=page,
-        per_page=payload["settings"]["item_page_size"],
-    )
-    session["page"] = page
-    session["screen"] = screen
-    await reply(update, page_text(title, page, total_pages), markup)
-
-
-async def handle_home(update: Update, session: Dict[str, object]):
-    session.clear()
-    session["role"] = "user"
-    session["screen"] = "home"
-    session["page"] = 0
-    await reply(update, "الصفحة الرئيسية", main_menu())
-
-
-async def handle_back(update: Update, session: Dict[str, object], payload):
-    screen = session.get("screen")
-    role = session.get("role", "user")
+async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
-
-    if role == "admin":
-        if screen in {"admin_add_category", "admin_del_category"}:
-            set_session(uid, screen="admin_dashboard", page=0)
-            await reply(update, "لوحة التحكم", admin_dashboard())
-            return
-        if screen in {"admin_add_type", "admin_del_type"}:
-            action = str(session.get("action", "add"))
-            set_session(uid, screen=f"admin_{action}_category", page=0)
-            await reply(update, "اختر القسم", admin_category_menu(action))
-            return
-        if screen in {"admin_add_targets", "admin_del_targets"}:
-            action = str(session.get("action", "add"))
-            category = str(session.get("category", "chroma"))
-            set_session(uid, screen=f"admin_{action}_type", page=0)
-            await reply(update, "اختر النوع", admin_type_menu(action, category))
-            return
-        if screen == "admin_add_sheikh_mode":
-            category = str(session.get("category", "chroma"))
-            sheikh = str(session.get("target_name", ""))
-            set_session(uid, screen="admin_add_targets", page=0, target_name=None, subtarget_name=None)
-            await show_targets_screen(update, session, payload, "اختر الشيخ", current_targets("sheikhs", payload), "admin_add_targets", category, "sheikhs")
-            return
-        if screen == "admin_add_sheikh_surah":
-            category = str(session.get("category", "chroma"))
-            sheikh = str(session.get("target_name", ""))
-            set_session(uid, screen="admin_add_sheikh_mode", page=0, target_name=sheikh)
-            await reply(update, "اختر طريقة الإضافة", sheikh_mode_menu())
-            return
-        if screen in {"admin_upload_target", "admin_upload_nature"}:
-            previous = str(session.get("return_screen", "admin_dashboard"))
-            if previous == "admin_add_sheikh_mode":
-                category = str(session.get("category", "chroma"))
-                set_session(uid, screen="admin_add_sheikh_mode", page=0)
-                await reply(update, "اختر طريقة الإضافة", sheikh_mode_menu())
-                return
-            if previous == "admin_add_sheikh_surah":
-                category = str(session.get("category", "chroma"))
-                sheikh = str(session.get("target_name", ""))
-                set_session(uid, screen="admin_add_sheikh_mode", page=0, target_name=sheikh)
-                await reply(update, "اختر طريقة الإضافة", sheikh_mode_menu())
-                return
-            if previous == "admin_add_targets":
-                action = str(session.get("action", "add"))
-                category = str(session.get("category", "chroma"))
-                set_session(uid, screen="admin_add_type", page=0)
-                await reply(update, "اختر النوع", admin_type_menu(action, category))
-                return
-            if previous == "admin_add_category":
-                set_session(uid, screen="admin_add_category", page=0)
-                await reply(update, "اختر القسم للإضافة", admin_category_menu("add"))
-                return
-            if previous == "admin_del_items":
-                category = str(session.get("category", "chroma"))
-                content_type = session.get("content_type")
-                target_name = session.get("target_name")
-                subtarget_name = session.get("subtarget_name")
-                items = current_items(payload, category, content_type, target_name, subtarget_name)
-                markup, page, total_pages, _indices = items_menu(len(items), int(session.get("page", 0)), payload["settings"]["item_page_size"])
-                session["page"] = page
-                await reply(update, "أعد الإرسال أو اضغط تم", markup)
-                return
-            if previous == "admin_del_nature_items":
-                items = payload["categories"]["nature"]
-                markup, page, total_pages, _indices = items_menu(len(items), int(session.get("page", 0)), payload["settings"]["item_page_size"])
-                session["page"] = page
-                await reply(update, "أعد الإرسال أو اضغط تم", markup)
-                return
-            set_session(uid, screen="admin_dashboard", page=0)
-            await reply(update, "لوحة التحكم", admin_dashboard())
-            return
-        if screen == "admin_add_target":
-            action = str(session.get("action", "add"))
-            category = str(session.get("category", "chroma"))
-            content_type = str(session.get("content_type", "surahs"))
-            if content_type == "surahs":
-                set_session(uid, screen="admin_add_targets", page=0)
-                await show_targets_screen(update, session, payload, "اختر السورة", SURAHS, "admin_add_targets", category, content_type)
-                return
-            set_session(uid, screen="admin_add_targets", page=0)
-            await show_targets_screen(update, session, payload, "اختر الشيخ", current_targets("sheikhs", payload), "admin_add_targets", category, content_type)
-            return
-        if screen == "admin_del_sheikh_surah":
-            category = str(session.get("category", "chroma"))
-            set_session(uid, screen="admin_del_targets", page=0, subtarget_name=None)
-            await show_targets_screen(update, session, payload, "اختر الشيخ للحذف", available_sheikhs_for_category(payload, category), "admin_del_targets", category, "sheikhs")
-            return
-        if screen in {"admin_del_items", "admin_del_nature_items"}:
-            set_session(uid, screen="admin_dashboard", page=0)
-            await reply(update, "لوحة التحكم", admin_dashboard())
-            return
-        if screen == "admin_clear_confirm":
-            previous = str(session.get("return_screen", "admin_dashboard"))
-            set_session(uid, screen=previous)
-            if previous == "admin_del_items":
-                category = str(session.get("category", "chroma"))
-                content_type = session.get("content_type")
-                target_name = session.get("target_name")
-                subtarget_name = session.get("subtarget_name")
-                items = current_items(payload, category, content_type, target_name, subtarget_name)
-                markup, page, total_pages, _indices = items_menu(len(items), int(session.get("page", 0)), payload["settings"]["item_page_size"])
-                session["page"] = page
-                await reply(update, "تم الإلغاء", markup)
-                return
-            if previous == "admin_del_nature_items":
-                items = payload["categories"]["nature"]
-                markup, page, total_pages, _indices = items_menu(len(items), int(session.get("page", 0)), payload["settings"]["item_page_size"])
-                session["page"] = page
-                await reply(update, "تم الإلغاء", markup)
-                return
-            await reply(update, "تم الإلغاء", admin_dashboard())
-            return
-        if screen == "admin_add_sheikh_name":
-            set_session(uid, screen="admin_dashboard", page=0)
-            await reply(update, "لوحة التحكم", admin_dashboard())
-            return
-        await reply(update, "اختر من القائمة", admin_dashboard())
-        return
-
-    # user
-    if screen in {"user_category", "user_surahs", "user_sheikhs", "user_sheikh_surahs", "user_search_wait", "user_search_results"}:
-        category = str(session.get("category", "chroma"))
-        if screen == "user_sheikh_surahs":
-            sheikh = str(session.get("target_name", ""))
-            surahs = storage.get_surah_targets_for_sheikh(payload, category, sheikh)
-            set_session(uid, screen="user_sheikhs", page=0, subtarget_name=None)
-            await show_targets_screen(update, session, payload, "اختر الشيخ", available_sheikhs_for_category(payload, category), "user_sheikhs", category, "sheikhs")
-            return
-        if screen == "user_search_wait":
-            set_session(uid, screen="user_category", page=0)
-            await reply(update, "قسمك الحالي", category_menu(category))
-            return
-        if screen == "user_search_results":
-            set_session(uid, screen="user_category", page=0)
-            await reply(update, "قسمك الحالي", category_menu(category))
-            return
-        set_session(uid, screen="user_category", page=0)
-        await reply(update, "قسمك الحالي", category_menu(category))
-        return
-
-    await show_main_menu(update, "الصفحة الرئيسية")
-
-
-async def handle_user_text(update: Update, session: Dict[str, object], payload, text: str):
-    uid = update.effective_user.id
-    screen = session.get("screen", "home")
+    text = (update.message.text or "").strip()
 
     if text == "كرومات":
-        set_session(uid, screen="user_category", category="chroma", content_type=None, page=0, target_name=None, subtarget_name=None)
-        await reply(update, "قسم الكرومات", category_menu("chroma"))
+        await update.message.reply_text("اختر", reply_markup=section_inline("chroma"))
         return
-
     if text == "تصاميم":
-        set_session(uid, screen="user_category", category="designs", content_type=None, page=0, target_name=None, subtarget_name=None)
-        await reply(update, "قسم التصاميم", category_menu("designs"))
+        await update.message.reply_text("اختر", reply_markup=section_inline("designs"))
         return
-
     if text == "مناظر طبيعية":
-        items = payload["categories"]["nature"]
-        if not items:
-            await reply(update, "لا يوجد محتوى بعد", main_menu())
+        rows = get_media("nature", "nature")
+        if not rows:
+            await update.message.reply_text("لا يوجد محتوى بعد")
             return
-        await reply(update, "مناظر طبيعية")
-        for item in items:
-            await send_item(update.message, item)
-        await reply(update, "اختر قسمًا آخر", main_menu())
+        for row in rows:
+            await send_item_media(update.message, row, "مناظر طبيعية")
+        return
+    if text == "بحث في السور":
+        state[uid] = {"mode": "search_surah"}
+        await update.message.reply_text("اكتب اسم السورة أو جزء منه")
         return
 
-    if text == "سور":
-        if screen not in {"user_category", "user_surahs", "user_search_results"}:
-            return
-        category = str(session.get("category", "chroma"))
-        available = available_surahs_for_category(payload, category)
-        if not available:
-            await reply(update, "لا توجد سور متاحة الآن", category_menu(category))
-            return
-        set_session(uid, screen="user_surahs", content_type="surahs", page=0, target_name=None, subtarget_name=None)
-        await show_targets_screen(update, session, payload, "اختر السورة", available, "user_surahs", category, "surahs")
+    s = state.get(uid, {})
+
+    if uid == ADMIN_ID and text == "رجوع":
+        state[uid] = {"mode": "admin_home"}
+        await update.message.reply_text("لوحة التحكم", reply_markup=admin_menu())
         return
 
-    if text == "شيوخ":
-        if screen not in {"user_category", "user_sheikhs", "user_sheikh_surahs"}:
-            return
-        category = str(session.get("category", "chroma"))
-        available = available_sheikhs_for_category(payload, category)
-        if not available:
-            await reply(update, "لا توجد شيوخ متاحون الآن", category_menu(category))
-            return
-        set_session(uid, screen="user_sheikhs", content_type="sheikhs", page=0, target_name=None, subtarget_name=None)
-        await show_targets_screen(update, session, payload, "اختر الشيخ", available, "user_sheikhs", category, "sheikhs")
+    if uid == ADMIN_ID and text == "إضافة محتوى":
+        state[uid] = {"mode": "admin_add_content"}
+        await update.message.reply_text("اختر القسم", reply_markup=admin_sections_inline())
         return
 
-    if text == "بحث عن سورة":
-        if screen not in {"user_category", "user_surahs", "user_search_results"}:
-            return
-        category = str(session.get("category", "chroma"))
-        set_session(uid, screen="user_search_wait", category=category, content_type="surahs", page=0)
-        await reply(update, "اكتب اسم السورة أو جزءًا منه")
+    if uid == ADMIN_ID and text == "إضافة شيخ":
+        state[uid] = {"mode": "admin_add_sheikh_name"}
+        await update.message.reply_text("اكتب اسم الشيخ أو عدة أسماء في سطور منفصلة", reply_markup=ReplyKeyboardRemove())
         return
 
-    if screen == "user_search_wait":
-        category = str(session.get("category", "chroma"))
-        available = available_surahs_for_category(payload, category)
-        matches = find_surahs(text, available)
+    if uid == ADMIN_ID and text == "حذف شيخ":
+        rows = all_sheikh_items()
+        if not rows:
+            await update.message.reply_text("لا يوجد شيوخ")
+            return
+        await update.message.reply_text("اختر الشيخ للحذف", reply_markup=make_paged_keyboard(rows, "delete_sheikh", "delete_sheikh", 0, "back|admin"))
+        return
+
+    if uid == ADMIN_ID and text == "إحصائيات":
+        media_count = len(_fetch("media", "id"))
+        sheikh_count = len(_fetch("sheikhs", "id"))
+        surah_count = len(available_surah_items("chroma")) + len(available_surah_items("designs"))
+        await update.message.reply_text(
+            f"""إحصائيات\nالمحتوى: {media_count}\nالشيوخ: {sheikh_count}\nالسور المستخدمة: {surah_count}"""
+        )
+        return
+
+    if uid == ADMIN_ID and s.get("mode") == "admin_add_sheikh_name":
+        names = [n.strip() for n in re.split(r"[\n,]+", text) if n.strip()]
+        added = 0
+        for name in names:
+            try:
+                _insert("sheikhs", {"name": name})
+                added += 1
+            except Exception:
+                pass
+        state[uid] = {"mode": "admin_home"}
+        await update.message.reply_text(f"تمت الإضافة: {added}", reply_markup=admin_menu())
+        return
+
+    if s.get("mode") == "search_surah":
+        query = text.lower()
+        rows = _fetch("surahs", "id,name")
+        available = set(item["id"] for item in available_surah_items("chroma") + available_surah_items("designs"))
+        matches = [{"id": r["id"], "label": f"{r['id']}. {r['name']}"} for r in rows if r["id"] in available and query in r["name"].lower()]
         if not matches:
-            await reply(update, "لم يتم العثور على نتائج. اكتب جزءًا آخر من اسم السورة")
+            await update.message.reply_text("لا توجد نتائج")
             return
-        set_session(uid, screen="user_search_results", page=0, targets=matches, category=category, content_type="surahs")
-        await show_targets_screen(update, session, payload, "نتائج البحث", matches, "user_search_results", category, "surahs")
+        await update.message.reply_text("النتائج", reply_markup=make_paged_keyboard(matches, "search_pick", "search_pick", 0, "back|home"))
         return
 
-    if screen == "user_surahs":
-        category = str(session.get("category", "chroma"))
-        targets = list(session.get("targets", available_surahs_for_category(payload, category)))
-        page = int(session.get("page", 0))
-        page_size = payload["settings"]["page_size"]
+    if uid == ADMIN_ID and text in {"إنهاء", "رجوع"}:
+        state[uid] = {"mode": "admin_home"}
+        await update.message.reply_text("لوحة التحكم", reply_markup=admin_menu())
+        return
 
-        if text == "السابق":
-            session["page"] = max(0, page - 1)
-            await show_targets_screen(update, session, payload, "اختر السورة", targets, "user_surahs", category, "surahs")
-            return
-        if text == "التالي":
-            max_page = max(0, (len(targets) - 1) // page_size)
-            session["page"] = min(max_page, page + 1)
-            await show_targets_screen(update, session, payload, "اختر السورة", targets, "user_surahs", category, "surahs")
-            return
-        if text in targets:
-            items = current_items(payload, category, "surahs", text)
-            if not items:
-                await reply(update, f"لا يوجد محتوى لـ {text}", category_menu(category))
-                return
-            await reply(update, f"{text}\nعدد العناصر: {len(items)}")
-            for item in items:
-                await send_item(update.message, item)
-            await show_targets_screen(update, session, payload, "اختر السورة", targets, "user_surahs", category, "surahs")
-            return
+# ---------- upload router ----------
 
-    if screen == "user_sheikhs":
-        category = str(session.get("category", "chroma"))
-        targets = list(session.get("targets", available_sheikhs_for_category(payload, category)))
-        page = int(session.get("page", 0))
-        page_size = payload["settings"]["page_size"]
-
-        if text == "السابق":
-            session["page"] = max(0, page - 1)
-            await show_targets_screen(update, session, payload, "اختر الشيخ", targets, "user_sheikhs", category, "sheikhs")
-            return
-        if text == "التالي":
-            max_page = max(0, (len(targets) - 1) // page_size)
-            session["page"] = min(max_page, page + 1)
-            await show_targets_screen(update, session, payload, "اختر الشيخ", targets, "user_sheikhs", category, "sheikhs")
-            return
-        if text in targets:
-            surahs = storage.get_surah_targets_for_sheikh(payload, category, text)
-            if not surahs:
-                await reply(update, f"لا يوجد محتوى لـ {text}", category_menu(category))
-                return
-            set_session(uid, screen="user_sheikh_surahs", target_name=text, subtarget_name=None, page=0)
-            await show_targets_screen(update, session, payload, f"{text} - اختر السورة", surahs, "user_sheikh_surahs", category, "sheikhs", extra={"target_name": text})
-            return
-
-    if screen == "user_sheikh_surahs":
-        category = str(session.get("category", "chroma"))
-        sheikh = str(session.get("target_name", ""))
-        surahs = list(session.get("targets", storage.get_surah_targets_for_sheikh(payload, category, sheikh)))
-        page = int(session.get("page", 0))
-        page_size = payload["settings"]["page_size"]
-
-        if text == "السابق":
-            session["page"] = max(0, page - 1)
-            await show_targets_screen(update, session, payload, f"{sheikh} - اختر السورة", surahs, "user_sheikh_surahs", category, "sheikhs", extra={"target_name": sheikh})
-            return
-        if text == "التالي":
-            max_page = max(0, (len(surahs) - 1) // page_size)
-            session["page"] = min(max_page, page + 1)
-            await show_targets_screen(update, session, payload, f"{sheikh} - اختر السورة", surahs, "user_sheikh_surahs", category, "sheikhs", extra={"target_name": sheikh})
-            return
-        if text in surahs:
-            items = current_items(payload, category, "sheikhs", sheikh, text)
-            if not items:
-                await reply(update, f"لا يوجد محتوى لـ {text}", category_menu(category))
-                return
-            await reply(update, f"{sheikh} / {text}\nعدد العناصر: {len(items)}")
-            for item in items:
-                await send_item(update.message, item)
-            await show_targets_screen(update, session, payload, f"{sheikh} - اختر السورة", surahs, "user_sheikh_surahs", category, "sheikhs", extra={"target_name": sheikh})
-            return
-
-    if screen == "user_search_results":
-        category = str(session.get("category", "chroma"))
-        targets = list(session.get("targets", []))
-        page = int(session.get("page", 0))
-        page_size = payload["settings"]["page_size"]
-        if text == "السابق":
-            session["page"] = max(0, page - 1)
-            await show_targets_screen(update, session, payload, "نتائج البحث", targets, "user_search_results", category, "surahs")
-            return
-        if text == "التالي":
-            max_page = max(0, (len(targets) - 1) // page_size)
-            session["page"] = min(max_page, page + 1)
-            await show_targets_screen(update, session, payload, "نتائج البحث", targets, "user_search_results", category, "surahs")
-            return
-        if text in targets:
-            items = current_items(payload, category, "surahs", text)
-            if not items:
-                await reply(update, f"لا يوجد محتوى لـ {text}", category_menu(category))
-                return
-            await reply(update, f"{text}\nعدد العناصر: {len(items)}")
-            for item in items:
-                await send_item(update.message, item)
-            await show_targets_screen(update, session, payload, "نتائج البحث", targets, "user_search_results", category, "surahs")
-            return
-
-    await reply(update, "اختر من القائمة", main_menu())
-
-
-async def handle_admin_text(update: Update, session: Dict[str, object], payload, text: str):
+async def on_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
-    screen = session.get("screen", "admin_dashboard")
-
-    if text == "الرئيسية":
-        await show_main_menu(update, "الصفحة الرئيسية")
+    if uid != ADMIN_ID:
+        return
+    s = state.get(uid, {})
+    if s.get("mode") not in {"admin_upload", "admin_upload_nature", "admin_upload_random"}:
         return
 
-    if screen == "admin_dashboard":
-        if text == "إضافة محتوى":
-            set_session(uid, screen="admin_add_category", action="add", page=0)
-            await reply(update, "اختر القسم للإضافة", admin_category_menu("add"))
-            return
-        if text == "حذف محتوى":
-            set_session(uid, screen="admin_del_category", action="del", page=0)
-            await reply(update, "اختر القسم للحذف", admin_category_menu("del"))
-            return
-        if text == "إضافة شيخ جديد":
-            set_session(uid, screen="admin_add_sheikh_name", page=0)
-            await reply(update, "اكتب اسم الشيخ الجديد. يمكنك كتابة أكثر من اسم في سطر واحد أو عدة أسطر.")
-            return
-        if text == "حذف شيخ":
-            set_session(uid, screen="admin_remove_sheikh_name", page=0)
-            await reply(update, "اكتب اسم الشيخ المراد حذفه. يمكنك كتابة أكثر من اسم في سطر واحد أو عدة أسطر.")
-            return
-        if text == "الإحصائيات":
-            stats = storage.stats(payload)
-            await reply(
-                update,
-                "الإحصائيات\n"
-                f"كرومات: {stats['chroma']}\n"
-                f"تصاميم: {stats['designs']}\n"
-                f"مناظر طبيعية: {stats['nature']}",
-                admin_dashboard(),
-            )
-            return
-
-    if screen == "admin_add_category":
-        if text in {"كرومات", "تصاميم"}:
-            category = "chroma" if text == "كرومات" else "designs"
-            set_session(uid, category=category, screen="admin_add_type", page=0, action="add")
-            await reply(update, "اختر النوع", admin_type_menu("add", category))
-            return
-        if text == "مناظر طبيعية":
-            set_session(uid, category="nature", screen="admin_upload_nature", mode="upload_nature", page=0)
-            await reply(update, "أرسل الصور أو الفيديوهات أو الملفات الآن. اضغط تم عند الانتهاء.", upload_menu())
-            return
-
-    if screen == "admin_add_type":
-        if text in {"سور", "شيوخ"}:
-            category = str(session.get("category", "chroma"))
-            content_type = "surahs" if text == "سور" else "sheikhs"
-            set_session(uid, content_type=content_type, screen="admin_add_targets", page=0, subtarget_name=None, target_name=None)
-            if content_type == "surahs":
-                await show_targets_screen(update, session, payload, "اختر السورة", SURAHS, "admin_add_targets", category, content_type)
-            else:
-                await show_targets_screen(update, session, payload, "اختر الشيخ", current_targets("sheikhs", payload), "admin_add_targets", category, content_type)
-            return
-
-    if screen == "admin_add_targets":
-        content_type = str(session.get("content_type", "surahs"))
-        category = str(session.get("category", "chroma"))
-        targets = list(session.get("targets", SURAHS if content_type == "surahs" else current_targets("sheikhs", payload)))
-        page = int(session.get("page", 0))
-        page_size = payload["settings"]["page_size"]
-
-        if text == "السابق":
-            session["page"] = max(0, page - 1)
-            if content_type == "surahs":
-                await show_targets_screen(update, session, payload, "اختر السورة", SURAHS, "admin_add_targets", category, content_type)
-            else:
-                await show_targets_screen(update, session, payload, "اختر الشيخ", current_targets("sheikhs", payload), "admin_add_targets", category, content_type)
-            return
-        if text == "التالي":
-            max_page = max(0, (len(targets) - 1) // page_size)
-            session["page"] = min(max_page, page + 1)
-            if content_type == "surahs":
-                await show_targets_screen(update, session, payload, "اختر السورة", SURAHS, "admin_add_targets", category, content_type)
-            else:
-                await show_targets_screen(update, session, payload, "اختر الشيخ", current_targets("sheikhs", payload), "admin_add_targets", category, content_type)
-            return
-        if text in targets:
-            if content_type == "surahs":
-                set_session(uid, target_name=text, subtarget_name=None, screen="admin_upload_target", mode="upload", return_screen="admin_add_targets")
-                await reply(update, f"أرسل المحتوى الآن لـ {text}. يمكنك إرسال صورة أو فيديو أو ملف أكثر من مرة.", upload_menu())
-                return
-            set_session(uid, target_name=text, subtarget_name=None, screen="admin_add_sheikh_mode", page=0)
-            await reply(update, "اختر طريقة الإضافة", sheikh_mode_menu())
-            return
-
-    if screen == "admin_add_sheikh_mode":
-        category = str(session.get("category", "chroma"))
-        sheikh = str(session.get("target_name", ""))
-        if text == "سور":
-            set_session(uid, screen="admin_add_sheikh_surah", page=0, return_screen="admin_add_sheikh_mode")
-            await show_targets_screen(update, session, payload, f"{sheikh} - اختر السورة", SURAHS, "admin_add_sheikh_surah", category, "sheikhs", extra={"target_name": sheikh})
-            return
-        if text == "عشوائي":
-            set_session(uid, subtarget_name="عشوائي", screen="admin_upload_target", mode="upload", return_screen="admin_add_sheikh_mode")
-            await reply(update, f"أرسل المحتوى الآن لـ {sheikh} / عشوائي. يمكنك إرسال صورة أو فيديو أو ملف أكثر من مرة.", upload_menu())
-            return
-
-    if screen == "admin_add_sheikh_surah":
-        category = str(session.get("category", "chroma"))
-        sheikh = str(session.get("target_name", ""))
-        page = int(session.get("page", 0))
-        page_size = payload["settings"]["page_size"]
-
-        if text == "السابق":
-            session["page"] = max(0, page - 1)
-            await show_targets_screen(update, session, payload, f"{sheikh} - اختر السورة", SURAHS, "admin_add_sheikh_surah", category, "sheikhs", extra={"target_name": sheikh})
-            return
-        if text == "التالي":
-            max_page = max(0, (len(SURAHS) - 1) // page_size)
-            session["page"] = min(max_page, page + 1)
-            await show_targets_screen(update, session, payload, f"{sheikh} - اختر السورة", SURAHS, "admin_add_sheikh_surah", category, "sheikhs", extra={"target_name": sheikh})
-            return
-        if text in SURAHS:
-            set_session(uid, subtarget_name=text, screen="admin_upload_target", mode="upload", return_screen="admin_add_sheikh_surah")
-            await reply(update, f"أرسل المحتوى الآن لـ {sheikh} / {text}. يمكنك إرسال صورة أو فيديو أو ملف أكثر من مرة.", upload_menu())
-            return
-
-    if screen in {"admin_upload_target", "admin_upload_nature"}:
-        if text == "إلغاء":
-            previous = str(session.get("return_screen", "admin_dashboard"))
-            if previous == "admin_add_sheikh_surah":
-                sheikh = str(session.get("target_name", ""))
-                set_session(uid, screen="admin_add_sheikh_mode", page=0)
-                await reply(update, "اختر طريقة الإضافة", sheikh_mode_menu())
-                return
-            if previous == "admin_add_sheikh_mode":
-                sheikh = str(session.get("target_name", ""))
-                set_session(uid, screen="admin_add_sheikh_mode", page=0)
-                await reply(update, "اختر طريقة الإضافة", sheikh_mode_menu())
-                return
-            if previous == "admin_add_targets":
-                action = str(session.get("action", "add"))
-                category = str(session.get("category", "chroma"))
-                set_session(uid, screen="admin_add_type", page=0)
-                await reply(update, "اختر النوع", admin_type_menu(action, category))
-                return
-            set_session(uid, screen="admin_dashboard", page=0)
-            await reply(update, "تم الإلغاء", admin_dashboard())
-            return
-        if text == "تم":
-            previous = str(session.get("return_screen", "admin_dashboard"))
-            if previous == "admin_add_sheikh_surah":
-                sheikh = str(session.get("target_name", ""))
-                set_session(uid, screen="admin_add_sheikh_mode", page=0)
-                await reply(update, "تم حفظ المحتوى", sheikh_mode_menu())
-                return
-            if previous == "admin_add_sheikh_mode":
-                set_session(uid, screen="admin_add_sheikh_mode", page=0)
-                await reply(update, "تم حفظ المحتوى", sheikh_mode_menu())
-                return
-            if previous == "admin_add_targets":
-                action = str(session.get("action", "add"))
-                category = str(session.get("category", "chroma"))
-                set_session(uid, screen="admin_add_type", page=0)
-                await reply(update, "تم حفظ المحتوى", admin_type_menu(action, category))
-                return
-            set_session(uid, screen="admin_dashboard", page=0)
-            await reply(update, "تم حفظ المحتوى", admin_dashboard())
-            return
-        await reply(update, "أرسل صورة أو فيديو أو ملف، أو اضغط تم", upload_menu())
-        return
-
-    if screen == "admin_del_category":
-        if text in {"كرومات", "تصاميم"}:
-            category = "chroma" if text == "كرومات" else "designs"
-            set_session(uid, category=category, screen="admin_del_type", page=0, action="del")
-            await reply(update, "اختر النوع", admin_type_menu("del", category))
-            return
-        if text == "مناظر طبيعية":
-            items = payload["categories"]["nature"]
-            if not items:
-                set_session(uid, screen="admin_dashboard", page=0)
-                await reply(update, "لا يوجد محتوى للحذف", admin_dashboard())
-                return
-            set_session(uid, category="nature", content_type=None, target_name=None, subtarget_name=None, screen="admin_del_nature_items", page=0)
-            markup, page, total_pages, _indices = items_menu(len(items), 0, payload["settings"]["item_page_size"])
-            session["page"] = page
-            await reply(update, page_text("المناظر الطبيعية", page, total_pages), markup)
-            return
-
-    if screen == "admin_del_type":
-        if text in {"سور", "شيوخ"}:
-            category = str(session.get("category", "chroma"))
-            content_type = "surahs" if text == "سور" else "sheikhs"
-            set_session(uid, content_type=content_type, screen="admin_del_targets", page=0, subtarget_name=None, target_name=None)
-            if content_type == "surahs":
-                targets = available_surahs_for_category(payload, category)
-                if not targets:
-                    set_session(uid, screen="admin_dashboard", page=0)
-                    await reply(update, "لا يوجد محتوى للحذف", admin_dashboard())
-                    return
-                await show_targets_screen(update, session, payload, "اختر السورة للحذف", targets, "admin_del_targets", category, content_type)
-            else:
-                targets = available_sheikhs_for_category(payload, category)
-                if not targets:
-                    set_session(uid, screen="admin_dashboard", page=0)
-                    await reply(update, "لا يوجد محتوى للحذف", admin_dashboard())
-                    return
-                await show_targets_screen(update, session, payload, "اختر الشيخ للحذف", targets, "admin_del_targets", category, content_type)
-            return
-
-    if screen == "admin_del_targets":
-        content_type = str(session.get("content_type", "surahs"))
-        category = str(session.get("category", "chroma"))
-        targets = list(session.get("targets", []))
-        page = int(session.get("page", 0))
-        page_size = payload["settings"]["page_size"]
-
-        if text == "السابق":
-            session["page"] = max(0, page - 1)
-            title = "اختر السورة للحذف" if content_type == "surahs" else "اختر الشيخ للحذف"
-            await show_targets_screen(update, session, payload, title, targets, "admin_del_targets", category, content_type)
-            return
-        if text == "التالي":
-            max_page = max(0, (len(targets) - 1) // page_size)
-            session["page"] = min(max_page, page + 1)
-            title = "اختر السورة للحذف" if content_type == "surahs" else "اختر الشيخ للحذف"
-            await show_targets_screen(update, session, payload, title, targets, "admin_del_targets", category, content_type)
-            return
-        if text in targets:
-            if content_type == "surahs":
-                items = current_items(payload, category, "surahs", text)
-                if not items:
-                    set_session(uid, screen="admin_dashboard", page=0)
-                    await reply(update, "لا يوجد عناصر للحذف", admin_dashboard())
-                    return
-                set_session(uid, target_name=text, subtarget_name=None, screen="admin_del_items", page=0)
-                markup, page, total_pages, _indices = items_menu(len(items), 0, payload["settings"]["item_page_size"])
-                session["page"] = page
-                await reply(update, page_text(f"حذف {text}", page, total_pages), markup)
-                return
-            set_session(uid, target_name=text, subtarget_name=None, screen="admin_del_sheikh_surah", page=0)
-            surahs = storage.get_surah_targets_for_sheikh(payload, category, text)
-            if not surahs:
-                set_session(uid, screen="admin_dashboard", page=0)
-                await reply(update, "لا يوجد محتوى للحذف", admin_dashboard())
-                return
-            await show_targets_screen(update, session, payload, f"{text} - اختر السورة للحذف", surahs, "admin_del_sheikh_surah", category, "sheikhs", extra={"target_name": text})
-            return
-
-    if screen == "admin_del_sheikh_surah":
-        category = str(session.get("category", "chroma"))
-        sheikh = str(session.get("target_name", ""))
-        surahs = list(session.get("targets", storage.get_surah_targets_for_sheikh(payload, category, sheikh)))
-        page = int(session.get("page", 0))
-        page_size = payload["settings"]["page_size"]
-
-        if text == "السابق":
-            session["page"] = max(0, page - 1)
-            await show_targets_screen(update, session, payload, f"{sheikh} - اختر السورة للحذف", surahs, "admin_del_sheikh_surah", category, "sheikhs", extra={"target_name": sheikh})
-            return
-        if text == "التالي":
-            max_page = max(0, (len(surahs) - 1) // page_size)
-            session["page"] = min(max_page, page + 1)
-            await show_targets_screen(update, session, payload, f"{sheikh} - اختر السورة للحذف", surahs, "admin_del_sheikh_surah", category, "sheikhs", extra={"target_name": sheikh})
-            return
-        if text in surahs:
-            items = current_items(payload, category, "sheikhs", sheikh, text)
-            if not items:
-                set_session(uid, screen="admin_dashboard", page=0)
-                await reply(update, "لا يوجد عناصر للحذف", admin_dashboard())
-                return
-            set_session(uid, target_name=sheikh, subtarget_name=text, screen="admin_del_items", page=0)
-            markup, page, total_pages, _indices = items_menu(len(items), 0, payload["settings"]["item_page_size"])
-            session["page"] = page
-            await reply(update, page_text(f"حذف {sheikh} / {text}", page, total_pages), markup)
-            return
-
-    if screen == "admin_del_items":
-        category = str(session.get("category", "chroma"))
-        content_type = session.get("content_type")
-        target_name = session.get("target_name")
-        subtarget_name = session.get("subtarget_name")
-        items = current_items(payload, category, content_type, target_name, subtarget_name)
-        page_size = payload["settings"]["item_page_size"]
-        page = int(session.get("page", 0))
-
-        if text == "السابق":
-            session["page"] = max(0, page - 1)
-            markup, page, total_pages, _indices = items_menu(len(items), session["page"], page_size)
-            session["page"] = page
-            title = f"حذف {target_name}" if content_type == "surahs" else f"حذف {target_name} / {subtarget_name}"
-            await reply(update, page_text(title, page, total_pages), markup)
-            return
-        if text == "التالي":
-            max_page = max(0, (max(1, len(items)) - 1) // page_size)
-            session["page"] = min(max_page, page + 1)
-            markup, page, total_pages, _indices = items_menu(len(items), session["page"], page_size)
-            session["page"] = page
-            title = f"حذف {target_name}" if content_type == "surahs" else f"حذف {target_name} / {subtarget_name}"
-            await reply(update, page_text(title, page, total_pages), markup)
-            return
-        if text == "حذف الكل":
-            set_session(uid, screen="admin_clear_confirm", return_screen="admin_del_items")
-            await reply(update, "هل تريد حذف كل العناصر؟", clear_confirm_menu())
-            return
-        m = re.match(r"^حذف (\d+)$", text)
-        if m:
-            item_index = int(m.group(1)) - 1
-            if storage.remove_item(payload, category, content_type, target_name, item_index, subtarget_name):
-                storage.save(payload)
-                items = current_items(payload, category, content_type, target_name, subtarget_name)
-                markup, page, total_pages, _indices = items_menu(len(items), page, page_size)
-                session["page"] = page
-                title = f"حذف {target_name}" if content_type == "surahs" else f"حذف {target_name} / {subtarget_name}"
-                await reply(update, "تم حذف العنصر", markup)
-            else:
-                await reply(update, "العنصر غير موجود", admin_dashboard())
-                set_session(uid, screen="admin_dashboard", page=0)
-            return
-
-    if screen == "admin_del_nature_items":
-        items = payload["categories"]["nature"]
-        page_size = payload["settings"]["item_page_size"]
-        page = int(session.get("page", 0))
-
-        if text == "السابق":
-            session["page"] = max(0, page - 1)
-            markup, page, total_pages, _indices = items_menu(len(items), session["page"], page_size)
-            session["page"] = page
-            await reply(update, page_text("المناظر الطبيعية", page, total_pages), markup)
-            return
-        if text == "التالي":
-            max_page = max(0, (max(1, len(items)) - 1) // page_size)
-            session["page"] = min(max_page, page + 1)
-            markup, page, total_pages, _indices = items_menu(len(items), session["page"], page_size)
-            session["page"] = page
-            await reply(update, page_text("المناظر الطبيعية", page, total_pages), markup)
-            return
-        if text == "حذف الكل":
-            set_session(uid, screen="admin_clear_confirm", return_screen="admin_del_nature_items")
-            await reply(update, "هل تريد حذف كل العناصر؟", clear_confirm_menu())
-            return
-        m = re.match(r"^حذف (\d+)$", text)
-        if m:
-            item_index = int(m.group(1)) - 1
-            if storage.remove_item(payload, "nature", None, None, item_index):
-                storage.save(payload)
-                items = payload["categories"]["nature"]
-                markup, page, total_pages, _indices = items_menu(len(items), page, page_size)
-                session["page"] = page
-                await reply(update, "تم حذف العنصر", markup)
-            else:
-                await reply(update, "العنصر غير موجود", admin_dashboard())
-                set_session(uid, screen="admin_dashboard", page=0)
-            return
-
-    if screen == "admin_clear_confirm":
-        if text == "نعم، احذف الكل":
-            category = str(session.get("category", "chroma"))
-            content_type = session.get("content_type")
-            target_name = session.get("target_name")
-            subtarget_name = session.get("subtarget_name")
-            if category == "nature":
-                storage.clear_target(payload, "nature", None, None)
-            else:
-                storage.clear_target(payload, category, content_type, target_name, subtarget_name)
-            storage.save(payload)
-            set_session(uid, screen="admin_dashboard", page=0)
-            await reply(update, "تم حذف الكل", admin_dashboard())
-            return
-        if text == "إلغاء":
-            previous = str(session.get("return_screen", "admin_dashboard"))
-            if previous == "admin_del_items":
-                category = str(session.get("category", "chroma"))
-                content_type = session.get("content_type")
-                target_name = session.get("target_name")
-                subtarget_name = session.get("subtarget_name")
-                items = current_items(payload, category, content_type, target_name, subtarget_name)
-                markup, page, total_pages, _indices = items_menu(len(items), int(session.get("page", 0)), payload["settings"]["item_page_size"])
-                set_session(uid, screen="admin_del_items", page=page)
-                await reply(update, "تم الإلغاء", markup)
-                return
-            if previous == "admin_del_nature_items":
-                items = payload["categories"]["nature"]
-                markup, page, total_pages, _indices = items_menu(len(items), int(session.get("page", 0)), payload["settings"]["item_page_size"])
-                set_session(uid, screen="admin_del_nature_items", page=page)
-                await reply(update, "تم الإلغاء", markup)
-                return
-            set_session(uid, screen="admin_dashboard", page=0)
-            await reply(update, "تم الإلغاء", admin_dashboard())
-            return
-
-    if screen == "admin_add_sheikh_name":
-        names = [n.strip() for n in re.split(r"[\n,؛]+", text) if n.strip()]
-        if not names:
-            await reply(update, "اكتب اسمًا واحدًا على الأقل")
-            return
-        added = storage.add_sheikh_names(payload, names)
-        storage.save(payload)
-        set_session(uid, screen="admin_dashboard", page=0)
-        if added:
-            await reply(update, "تم إضافة الشيوخ التالية أسماؤهم:\n" + "\n".join(added), admin_dashboard())
-        else:
-            await reply(update, "كل الأسماء موجودة بالفعل", admin_dashboard())
-        return
-
-    if screen == "admin_remove_sheikh_name":
-        names = [n.strip() for n in re.split(r"[\n,؛]+", text) if n.strip()]
-        if not names:
-            await reply(update, "اكتب اسمًا واحدًا على الأقل")
-            return
-        removed = storage.remove_sheikh_names(payload, names)
-        storage.save(payload)
-        set_session(uid, screen="admin_dashboard", page=0)
-        if removed:
-            await reply(update, "تم حذف الشيوخ التالية أسماؤهم:\n" + "\n".join(removed), admin_dashboard())
-        else:
-            await reply(update, "لم يتم العثور على الأسماء", admin_dashboard())
-        return
-
-    await reply(update, "اختر من القائمة", admin_dashboard())
-
-
-async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    text = (update.message.text or "").strip()
-    session = get_session(user_id)
-    payload = storage.load()
-
-    if text == "/start":
-        await start(update, context)
-        return
-    if text == "/admin":
-        await admin_cmd(update, context)
-        return
-
-    if text == "الرئيسية":
-        await handle_home(update, session)
-        return
-    if text == "رجوع":
-        await handle_back(update, session, payload)
-        return
-
-    if session.get("role") == "admin" and is_admin(user_id):
-        await handle_admin_text(update, session, payload, text)
-    else:
-        await handle_user_text(update, session, payload, text)
-
-
-async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    if not is_admin(user_id):
-        return
-    session = get_session(user_id)
-    if session.get("screen") not in {"admin_upload_target", "admin_upload_nature"}:
-        return
-
-    msg = update.message
+    msg = update.effective_message
     file_id = None
-    media_type = None
-    caption = msg.caption or ""
-
+    file_kind = None
     if msg.photo:
         file_id = msg.photo[-1].file_id
-        media_type = "photo"
+        file_kind = "photo"
     elif msg.video:
         file_id = msg.video.file_id
-        media_type = "video"
+        file_kind = "video"
     elif msg.document:
         file_id = msg.document.file_id
-        media_type = "document"
-    else:
-        await msg.reply_text("أرسل صورة أو فيديو أو ملف", reply_markup=upload_menu())
+        file_kind = "document"
+
+    if not file_id:
         return
 
-    data = storage.load()
-    item = {"media_type": media_type, "file_id": file_id, "caption": caption}
-
-    if session.get("screen") == "admin_upload_nature":
-        storage.add_item(data, "nature", None, None, item)
+    if s["mode"] == "admin_upload_nature":
+        add_media("nature", "nature", file_id, file_kind)
+    elif s["mode"] == "admin_upload_random":
+        add_media(s["section"], "random", file_id, file_kind)
     else:
-        storage.add_item(
-            data,
-            str(session.get("category", "chroma")),
-            str(session.get("content_type", "surahs")),
-            str(session.get("target_name", "")),
-            item,
-            str(session.get("subtarget_name")) if session.get("subtarget_name") else None,
-        )
+        add_media(s["section"], s["category"], file_id, file_kind, s.get("item_id"))
 
-    storage.save(data)
-    await msg.reply_text("تم الحفظ، أرسل المزيد أو اضغط تم", reply_markup=upload_menu())
+    await msg.reply_text("تم الحفظ", reply_markup=upload_menu())
 
+# ---------- callbacks ----------
 
-def main():
-    if not BOT_TOKEN:
-        raise RuntimeError("BOT_TOKEN is missing. Put it in .env")
-    if not ADMIN_ID:
-        raise RuntimeError("ADMIN_ID is missing. Put it in .env")
+async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    uid = q.from_user.id
+    data = q.data or ""
 
-    app = Application.builder().token(BOT_TOKEN).build()
+    if data == "back|home":
+        state.pop(uid, None)
+        await q.message.reply_text("أهلا بك", reply_markup=main_menu())
+        return
+
+    if data == "back|admin":
+        state[uid] = {"mode": "admin_home"}
+        await q.message.reply_text("لوحة التحكم", reply_markup=admin_menu())
+        return
+
+    if data == "back|admin_sections":
+        state[uid] = {"mode": "admin_add_content"}
+        await q.edit_message_text("اختر القسم", reply_markup=admin_sections_inline())
+        return
+
+    if data.startswith("page|"):
+        _, view, section, category, page_s = data.split("|")
+        page = int(page_s)
+
+        if view == "browse":
+            if category == "surah":
+                items = available_surah_items(section)
+            elif category == "sheikh":
+                items = available_sheikh_items(section)
+            else:
+                items = [{"id": 0, "label": "عشوائي"}] if get_media(section, "random") else []
+            if not items:
+                await q.edit_message_text("لا يوجد محتوى متاح")
+                return
+            await q.edit_message_text("اختر", reply_markup=make_paged_keyboard(items, f"sel|browse|{section}|{category}", f"browse|{section}|{category}", page, f"browse|{section}|{category}|0"))
+            return
+
+        if view == "adminpick":
+            if category == "surah":
+                items = all_surah_items()
+            elif category == "sheikh":
+                items = all_sheikh_items()
+            else:
+                items = []
+            if not items:
+                await q.edit_message_text("لا توجد عناصر")
+                return
+            await q.edit_message_text("اختر", reply_markup=make_paged_keyboard(items, f"sel|admin|{section}|{category}", f"adminpick|{section}|{category}", page, "back|admin_sections"))
+            return
+
+        if view == "delete_sheikh":
+            items = all_sheikh_items()
+            if not items:
+                await q.edit_message_text("لا يوجد شيوخ")
+                return
+            await q.edit_message_text("اختر الشيخ للحذف", reply_markup=make_paged_keyboard(items, "delete_sheikh", "delete_sheikh", page, "back|admin"))
+            return
+
+        if view == "search_pick":
+            # search uses available surahs only; same as browse selection
+            items = [{"id": sid, "label": f"{sid}. {name}"} for name, sid in SURAH_LIST]
+            await q.edit_message_text("اختر", reply_markup=make_paged_keyboard(items, "search_pick", "search_pick", page, "back|home"))
+            return
+
+    if data.startswith("browse|"):
+        _, section, category, page_s = data.split("|")
+        page = int(page_s)
+        if category == "surah":
+            items = available_surah_items(section)
+        elif category == "sheikh":
+            items = available_sheikh_items(section)
+        else:
+            items = [{"id": 0, "label": "عشوائي"}] if get_media(section, "random") else []
+        if not items:
+            await q.edit_message_text("لا يوجد محتوى متاح")
+            return
+        await q.edit_message_text("اختر", reply_markup=make_paged_keyboard(items, f"sel|browse|{section}|{category}", f"browse|{section}|{category}", page, f"back|home"))
+        return
+
+    if data.startswith("admin|section|"):
+        section = data.split("|")[-1]
+        s = state.setdefault(uid, {})
+        s["mode"] = "admin_add_content"
+        s["section"] = section
+        if section == "nature":
+            s["mode"] = "admin_upload_nature"
+            await q.edit_message_text("أرسل الملفات الآن", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("رجوع", callback_data="back|admin")]]))
+            return
+        await q.edit_message_text("اختر النوع", reply_markup=admin_type_inline(section))
+        return
+
+    if data.startswith("admin|type|"):
+        _, _, section, category = data.split("|")
+        s = state.setdefault(uid, {})
+        s["section"] = section
+        s["category"] = category
+        if category == "random":
+            s["mode"] = "admin_upload_random"
+            await q.edit_message_text("أرسل الملفات الآن", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("رجوع", callback_data="back|admin_sections")]]))
+            return
+
+        s["mode"] = "admin_pick_item"
+        if category == "surah":
+            items = all_surah_items()
+        else:
+            items = all_sheikh_items()
+        if not items:
+            if category == "sheikh":
+                await q.edit_message_text("لا يوجد شيوخ. أضف شيخًا أولًا", reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("إضافة شيخ جديد", callback_data="admin|add_sheikh_new")],
+                    [InlineKeyboardButton("رجوع", callback_data="back|admin_sections")],
+                ]))
+                return
+            await q.edit_message_text("لا توجد عناصر")
+            return
+        await q.edit_message_text("اختر", reply_markup=make_paged_keyboard(items, f"sel|admin|{section}|{category}", f"adminpick|{section}|{category}", 0, "back|admin_sections"))
+        return
+
+    if data == "admin|add_sheikh_new":
+        state[uid] = {"mode": "admin_add_sheikh_name"}
+        await q.message.reply_text("اكتب اسم الشيخ أو عدة أسماء في سطور منفصلة", reply_markup=ReplyKeyboardRemove())
+        return
+
+    if data.startswith("sel|"):
+        _, target, section, category, item_id_s = data.split("|")
+        item_id = int(item_id_s)
+
+        if target == "browse":
+            media = get_media(section, category, item_id if item_id else None)
+            if not media:
+                await q.edit_message_text("لا يوجد محتوى")
+                return
+            if category == "surah":
+                name = _fetch_one("surahs", "name", id=item_id)["name"]
+            elif category == "sheikh":
+                name = _fetch_one("sheikhs", "name", id=item_id)["name"]
+            else:
+                name = "عشوائي"
+            await q.edit_message_text(f"المحتوى: {name}")
+            for row in media:
+                await send_item_media(q.message, row, name)
+            return
+
+        if target == "admin":
+            s = state.setdefault(uid, {})
+            s["mode"] = "admin_upload"
+            s["section"] = section
+            s["category"] = category
+            s["item_id"] = item_id
+            label = ""
+            if category == "surah":
+                label = (_fetch_one("surahs", "name", id=item_id) or {}).get("name", "")
+            else:
+                label = (_fetch_one("sheikhs", "name", id=item_id) or {}).get("name", "")
+            await q.edit_message_text(f"أرسل الوسائط الآن لـ {label}", reply_markup=upload_menu())
+            return
+
+    if data.startswith("delete_sheikh"):
+        # callback structure: delete_sheikh:<id> OR page|delete_sheikh|... handled above
+        parts = data.split(":")
+        if len(parts) == 2:
+            sheikh_id = int(parts[1])
+            delete_sheikh(sheikh_id)
+            state[uid] = {"mode": "admin_home"}
+            await q.message.reply_text("تم الحذف", reply_markup=admin_menu())
+            return
+
+def register(app: Application):
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("admin", admin_cmd))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
-    app.add_handler(MessageHandler(filters.PHOTO | filters.VIDEO | filters.Document.ALL, handle_media))
-    logger.info("Bot started")
-    app.run_polling(close_loop=False)
+    app.add_handler(CallbackQueryHandler(on_callback))
+    app.add_handler(MessageHandler(filters.PHOTO | filters.VIDEO | filters.Document.ALL, on_media))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
 
+def main():
+    seed_surahs_if_needed()
+    app = Application.builder().token(BOT_TOKEN).build()
+    register(app)
+    app.run_polling()
 
 if __name__ == "__main__":
     main()

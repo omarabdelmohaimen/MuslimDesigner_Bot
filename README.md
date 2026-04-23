@@ -1,38 +1,24 @@
-# Quran Media Bot Pro (Reply Keyboard)
+# Quran Media Bot + Supabase
 
-بوت تيليجرام لإدارة:
-- كرومات
-- تصاميم
-- مناظر طبيعية
+## الفكرة
+البوت يخزن البيانات في Supabase Postgres، ويخزن file_id فقط للوسائط بدل رفع الملفات إلى تخزين خارجي.
 
-## المزايا
-- الصفحة الرئيسية بـ Reply Keyboard
-- قوائم السور تلقائيًا
-- بحث عن السور داخل القسم
-- لوحة تحكم للأدمن بالأزرار فقط
-- إضافة محتوى من داخل البوت
-- إضافة أسماء شيوخ جديدة من الأدمن
-- حذف عنصر واحد أو حذف الكل
-- الإحصائيات
-- تخزين في JSON
+## لماذا هذا مناسب؟
+- Telegram file_ids can be treated as persistent.
+- Supabase Free plan currently includes 500 MB database size quota and 1 GB storage quota.
+- If you stay within quota, no extra charge applies.
 
 ## التشغيل
-1. انسخ `.env.example` إلى `.env`
-2. ضع `BOT_TOKEN` و `ADMIN_ID`
-3. ثبّت المتطلبات:
+1. أنشئ مشروع Supabase.
+2. افتح SQL Editor وشغّل `supabase_schema.sql`.
+3. أنشئ بوت من BotFather.
+4. انسخ `.env.example` إلى `.env` واملأ القيم.
+5. ثبّت الحزم:
+   `pip install -r requirements.txt`
+6. شغّل:
+   `python bot.py`
 
-```bash
-pip install -r requirements.txt
-```
-
-4. شغّل البوت:
-
-```bash
-python bot.py
-```
-
-## ملاحظات
-- ملفات الصور أو الفيديو أو الملفات تُحفظ كـ `file_id` داخل JSON.
-- استخدم `/admin` لفتح لوحة التحكم.
-- داخل قسم السور يمكنك استخدام زر `بحث عن سورة` للعثور على السورة بسرعة.
-- من لوحة التحكم يمكنك استخدام `إضافة شيخ جديد` لإضافة أسماء شيوخ جديدة إلى القوائم.
+## ملاحظات مهمة
+- استخدم Python 3.11.
+- /admin يظهر فقط للأدمن.
+- المحتوى لا يضيع بعد إعادة النشر لأن التخزين في Supabase.
