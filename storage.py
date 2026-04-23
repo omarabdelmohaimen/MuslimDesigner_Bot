@@ -4,30 +4,6 @@ import json
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-DEFAULT_DATA = {
-    "categories": {
-        "chroma": {"surahs": {}, "sheikhs": {}},
-        "designs": {"surahs": {}, "sheikhs": {}},
-        "nature": []
-    },
-    "settings": {
-        "default_sheikhs": [
-            "عبدالباسط عبدالصمد",
-            "محمد صديق المنشاوي",
-            "محمود خليل الحصري",
-            "مشاري راشد العفاسي",
-            "ماهر المعيقلي",
-            "أحمد العجمي",
-            "سعد الغامدي",
-            "ياسر الدوسري",
-            "علي جابر",
-            "عبدالرحمن السديس"
-        ],
-        "page_size": 12,
-        "item_page_size": 8
-    }
-}
-
 SURAHS: List[str] = [
     "الفاتحة","البقرة","آل عمران","النساء","المائدة","الأنعام","الأعراف","الأنفال","التوبة",
     "يونس","هود","يوسف","الرعد","إبراهيم","الحجر","النحل","الإسراء","الكهف","مريم","طه",
@@ -42,6 +18,46 @@ SURAHS: List[str] = [
     "القدر","البينة","الزلزلة","العاديات","القارعة","التكاثر","العصر","الهمزة","الفيل",
     "قريش","الماعون","الكوثر","الكافرون","النصر","المسد","الإخلاص","الفلق","الناس"
 ]
+
+DEFAULT_SHEIKHS: List[str] = [
+    "عبدالباسط عبدالصمد",
+    "محمد صديق المنشاوي",
+    "محمود خليل الحصري",
+    "مشاري راشد العفاسي",
+    "ماهر المعيقلي",
+    "أحمد العجمي",
+    "سعد الغامدي",
+    "ياسر الدوسري",
+    "علي جابر",
+    "عبدالرحمن السديس",
+]
+
+DEFAULT_DATA: Dict[str, Any] = {
+    "categories": {
+        "chroma": {"surahs": {}, "sheikhs": {}},
+        "designs": {"surahs": {}, "sheikhs": {}},
+        "nature": [],
+    },
+    "settings": {
+        "default_sheikhs": DEFAULT_SHEIKHS[:],
+        "page_size": 12,
+        "item_page_size": 8,
+    },
+}
+
+
+def _copy_default() -> Dict[str, Any]:
+    return json.loads(json.dumps(DEFAULT_DATA, ensure_ascii=False))
+
+
+def _ensure_item(item: Any) -> Dict[str, Any]:
+    if isinstance(item, dict):
+        return {
+            "media_type": str(item.get("media_type", "photo")),
+            "file_id": str(item.get("file_id", "")),
+            "caption": str(item.get("caption", "")),
+        }
+    return {"media_type": "photo", "file_id": str(item), "caption": ""}
 
 
 def ensure_structure(data: Dict[str, Any]) -> Dict[str, Any]:
@@ -60,12 +76,36 @@ def ensure_structure(data: Dict[str, Any]) -> Dict[str, Any]:
             if t not in categories[category] or not isinstance(categories[category].get(t), dict):
                 categories[category][t] = {}
 
+        # Normalize surah items
+        for surah, items in list(categories[category]["surahs"].items()):
+            if not isinstance(items, list):
+                categories[category]["surahs"][surah] = []
+            else:
+                categories[category]["surahs"][surah] = [_ensure_item(x) for x in items]
+
+        # Normalize sheikh -> surah -> items
+        for sheikh, value in list(categories[category]["sheikhs"].items()):
+            if isinstance(value, list):
+                categories[category]["sheikhs"][sheikh] = {"عام": [_ensure_item(x) for x in value]}
+                continue
+            if not isinstance(value, dict):
+                categories[category]["sheikhs"][sheikh] = {}
+                continue
+            for surah, items in list(value.items()):
+                if not isinstance(items, list):
+                    categories[category]["sheikhs"][sheikh][surah] = []
+                else:
+                    categories[category]["sheikhs"][sheikh][surah] = [_ensure_item(x) for x in items]
+
     if "nature" not in categories or not isinstance(categories.get("nature"), list):
         categories["nature"] = []
+    categories["nature"] = [_ensure_item(x) for x in categories["nature"]]
 
     settings = data["settings"]
     if not isinstance(settings.get("default_sheikhs"), list):
-        settings["default_sheikhs"] = DEFAULT_DATA["settings"]["default_sheikhs"][:]
+        settings["default_sheikhs"] = DEFAULT_SHEIKHS[:]
+    else:
+        settings["default_sheikhs"] = [str(x).strip() for x in settings["default_sheikhs"] if str(x).strip()]
     settings["page_size"] = int(settings.get("page_size", DEFAULT_DATA["settings"]["page_size"]))
     settings["item_page_size"] = int(settings.get("item_page_size", DEFAULT_DATA["settings"]["item_page_size"]))
 
@@ -77,11 +117,11 @@ class Storage:
         self.path = path
         self.path.parent.mkdir(parents=True, exist_ok=True)
         if not self.path.exists():
-            self.save(json.loads(json.dumps(DEFAULT_DATA, ensure_ascii=False)))
+            self.save(_copy_default())
 
     def load(self) -> Dict[str, Any]:
         if not self.path.exists():
-            return json.loads(json.dumps(DEFAULT_DATA, ensure_ascii=False))
+            return _copy_default()
         with self.path.open("r", encoding="utf-8") as f:
             data = json.load(f)
         return ensure_structure(data)
@@ -91,72 +131,223 @@ class Storage:
         with self.path.open("w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
 
-    def get_target_name(self, content_type: str, index: int, data: Optional[Dict[str, Any]] = None) -> Optional[str]:
-        if content_type == "surahs":
-            if 0 <= index < len(SURAHS):
-                return SURAHS[index]
-            return None
-        if content_type == "sheikhs":
-            source = (data or self.load())["settings"]["default_sheikhs"]
-            if 0 <= index < len(source):
-                return source[index]
-            return None
-        return None
+    def _available_surahs(self, data: Dict[str, Any], category: str) -> List[str]:
+        return [s for s, items in data["categories"].get(category, {}).get("surahs", {}).items() if items]
 
-    def get_targets(self, content_type: str, data: Optional[Dict[str, Any]] = None) -> List[str]:
+    def _available_sheikhs(self, data: Dict[str, Any], category: str) -> List[str]:
+        out: List[str] = []
+        sheikhs = data["categories"].get(category, {}).get("sheikhs", {})
+        for sheikh, surah_map in sheikhs.items():
+            if isinstance(surah_map, dict) and any(items for items in surah_map.values()):
+                out.append(sheikh)
+        return out
+
+    def get_targets(
+        self,
+        content_type: str,
+        data: Optional[Dict[str, Any]] = None,
+        *,
+        category: Optional[str] = None,
+        available_only: bool = False,
+    ) -> List[str]:
+        data = data or self.load()
         if content_type == "surahs":
+            if available_only and category in {"chroma", "designs"}:
+                return self._available_surahs(data, category)
             return SURAHS[:]
         if content_type == "sheikhs":
-            return (data or self.load())["settings"]["default_sheikhs"][:]
+            if available_only and category in {"chroma", "designs"}:
+                return self._available_sheikhs(data, category)
+            return data["settings"]["default_sheikhs"][:]
         return []
 
-    def get_items(self, data: Dict[str, Any], category: str, content_type: Optional[str], target_name: Optional[str]) -> List[Dict[str, Any]]:
+    def get_surah_targets_for_sheikh(self, data: Dict[str, Any], category: str, sheikh_name: str) -> List[str]:
+        surah_map = data["categories"].get(category, {}).get("sheikhs", {}).get(sheikh_name, {})
+        if not isinstance(surah_map, dict):
+            return []
+        return [surah for surah, items in surah_map.items() if items]
+
+    def get_items(
+        self,
+        data: Dict[str, Any],
+        category: str,
+        content_type: Optional[str],
+        target_name: Optional[str],
+        subtarget_name: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
         if category == "nature":
             return data["categories"]["nature"]
-        if content_type is None or target_name is None:
-            return []
-        return data["categories"].get(category, {}).get(content_type, {}).get(target_name, [])
+        if content_type == "surahs":
+            if not target_name:
+                return []
+            return data["categories"].get(category, {}).get("surahs", {}).get(target_name, [])
+        if content_type == "sheikhs":
+            if not target_name:
+                return []
+            sheikh_map = data["categories"].get(category, {}).get("sheikhs", {}).get(target_name, {})
+            if not isinstance(sheikh_map, dict):
+                return []
+            if subtarget_name:
+                return sheikh_map.get(subtarget_name, [])
+            # merge all surah buckets for legacy display
+            merged: List[Dict[str, Any]] = []
+            for items in sheikh_map.values():
+                merged.extend(items)
+            return merged
+        return []
 
-    def set_items(self, data: Dict[str, Any], category: str, content_type: str, target_name: str, items: List[Dict[str, Any]]) -> None:
-        data["categories"][category][content_type][target_name] = items
+    def set_items(
+        self,
+        data: Dict[str, Any],
+        category: str,
+        content_type: str,
+        target_name: str,
+        items: List[Dict[str, Any]],
+        subtarget_name: Optional[str] = None,
+    ) -> None:
+        if category == "nature":
+            data["categories"]["nature"] = items
+            return
+        if content_type == "surahs":
+            data["categories"][category][content_type][target_name] = items
+            return
+        if content_type == "sheikhs":
+            sheikhs = data["categories"][category]["sheikhs"]
+            sheikh_bucket = sheikhs.setdefault(target_name, {})
+            if subtarget_name is None:
+                subtarget_name = "عام"
+            sheikh_bucket[subtarget_name] = items
 
-    def add_item(self, data: Dict[str, Any], category: str, content_type: Optional[str], target_name: Optional[str], item: Dict[str, Any]) -> None:
+    def add_item(
+        self,
+        data: Dict[str, Any],
+        category: str,
+        content_type: Optional[str],
+        target_name: Optional[str],
+        item: Dict[str, Any],
+        subtarget_name: Optional[str] = None,
+    ) -> None:
+        item = _ensure_item(item)
         if category == "nature":
             data["categories"]["nature"].append(item)
             return
-        if content_type is None or target_name is None:
+        if content_type == "surahs":
+            if content_type is None or target_name is None:
+                return
+            bucket = data["categories"][category]["surahs"].setdefault(target_name, [])
+            bucket.append(item)
             return
-        bucket = data["categories"][category][content_type].setdefault(target_name, [])
-        bucket.append(item)
+        if content_type == "sheikhs":
+            if target_name is None:
+                return
+            sheikh_bucket = data["categories"][category]["sheikhs"].setdefault(target_name, {})
+            if not isinstance(sheikh_bucket, dict):
+                sheikh_bucket = {"عام": []}
+                data["categories"][category]["sheikhs"][target_name] = sheikh_bucket
+            if subtarget_name is None:
+                subtarget_name = "عام"
+            sheikh_bucket.setdefault(subtarget_name, []).append(item)
 
-    def remove_item(self, data: Dict[str, Any], category: str, content_type: Optional[str], target_name: Optional[str], item_index: int) -> bool:
+    def remove_item(
+        self,
+        data: Dict[str, Any],
+        category: str,
+        content_type: Optional[str],
+        target_name: Optional[str],
+        item_index: int,
+        subtarget_name: Optional[str] = None,
+    ) -> bool:
         if category == "nature":
             items = data["categories"]["nature"]
             if 0 <= item_index < len(items):
                 items.pop(item_index)
                 return True
             return False
-        if content_type is None or target_name is None:
+        if content_type == "surahs":
+            if target_name is None:
+                return False
+            items = data["categories"][category]["surahs"].get(target_name, [])
+            if 0 <= item_index < len(items):
+                items.pop(item_index)
+                return True
             return False
-        items = data["categories"][category][content_type].get(target_name, [])
-        if 0 <= item_index < len(items):
-            items.pop(item_index)
-            return True
+        if content_type == "sheikhs":
+            if target_name is None:
+                return False
+            sheikh_map = data["categories"][category]["sheikhs"].get(target_name, {})
+            if not isinstance(sheikh_map, dict):
+                return False
+            if subtarget_name:
+                items = sheikh_map.get(subtarget_name, [])
+                if 0 <= item_index < len(items):
+                    items.pop(item_index)
+                    return True
+                return False
+            merged: List[tuple[str, Dict[str, Any]]] = []
+            for surah, items in sheikh_map.items():
+                for item in items:
+                    merged.append((surah, item))
+            if 0 <= item_index < len(merged):
+                # remove from the flattened list by searching again
+                remaining = item_index
+                for surah, items in sheikh_map.items():
+                    if remaining < len(items):
+                        items.pop(remaining)
+                        return True
+                    remaining -= len(items)
+            return False
         return False
 
-    def clear_target(self, data: Dict[str, Any], category: str, content_type: Optional[str], target_name: Optional[str]) -> bool:
+    def clear_target(
+        self,
+        data: Dict[str, Any],
+        category: str,
+        content_type: Optional[str],
+        target_name: Optional[str],
+        subtarget_name: Optional[str] = None,
+    ) -> bool:
         if category == "nature":
             data["categories"]["nature"] = []
             return True
-        if content_type is None or target_name is None:
-            return False
-        data["categories"][category][content_type][target_name] = []
-        return True
+        if content_type == "surahs":
+            if target_name is None:
+                return False
+            data["categories"][category]["surahs"][target_name] = []
+            return True
+        if content_type == "sheikhs":
+            if target_name is None:
+                return False
+            sheikh_map = data["categories"][category]["sheikhs"].setdefault(target_name, {})
+            if not isinstance(sheikh_map, dict):
+                sheikh_map = {}
+                data["categories"][category]["sheikhs"][target_name] = sheikh_map
+            if subtarget_name:
+                sheikh_map[subtarget_name] = []
+            else:
+                data["categories"][category]["sheikhs"][target_name] = {}
+            return True
+        return False
 
     def stats(self, data: Dict[str, Any]) -> Dict[str, int]:
         out = {"nature": len(data["categories"]["nature"]), "chroma": 0, "designs": 0}
         for cat in ("chroma", "designs"):
-            for t in ("surahs", "sheikhs"):
-                for items in data["categories"][cat][t].values():
-                    out[cat] += len(items)
+            for item in data["categories"][cat]["surahs"].values():
+                out[cat] += len(item)
+            for sheikh_map in data["categories"][cat]["sheikhs"].values():
+                if isinstance(sheikh_map, dict):
+                    for items in sheikh_map.values():
+                        out[cat] += len(items)
         return out
+
+    def add_sheikh_names(self, data: Dict[str, Any], names: List[str]) -> List[str]:
+        current = data["settings"]["default_sheikhs"]
+        added: List[str] = []
+        existing = {name.strip() for name in current}
+        for raw in names:
+            name = raw.strip()
+            if not name or name in existing:
+                continue
+            current.append(name)
+            existing.add(name)
+            added.append(name)
+        return added
