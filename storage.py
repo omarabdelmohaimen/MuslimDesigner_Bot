@@ -110,9 +110,11 @@ class Storage:
             return (data or self.load())["settings"]["default_sheikhs"][:]
         return []
 
-    def get_items(self, data: Dict[str, Any], category: str, content_type: str, target_name: str) -> List[Dict[str, Any]]:
+    def get_items(self, data: Dict[str, Any], category: str, content_type: Optional[str], target_name: Optional[str]) -> List[Dict[str, Any]]:
         if category == "nature":
             return data["categories"]["nature"]
+        if content_type is None or target_name is None:
+            return []
         return data["categories"].get(category, {}).get(content_type, {}).get(target_name, [])
 
     def set_items(self, data: Dict[str, Any], category: str, content_type: str, target_name: str, items: List[Dict[str, Any]]) -> None:
