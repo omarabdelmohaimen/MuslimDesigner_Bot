@@ -15,14 +15,11 @@ def _kb(rows):
     )
 
 
-def main_menu(is_admin: bool = False) -> ReplyKeyboardMarkup:
-    rows = [
+def main_menu() -> ReplyKeyboardMarkup:
+    return _kb([
         ["🎬 كرومات", "🎨 تصاميم"],
         ["🌿 مناظر طبيعية"],
-    ]
-    if is_admin:
-        rows.append(["🛠️ لوحة التحكم"])
-    return _kb(rows)
+    ])
 
 
 def category_menu(category: str) -> ReplyKeyboardMarkup:

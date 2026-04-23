@@ -45,7 +45,7 @@ def is_admin(user_id: int) -> bool:
 
 def get_session(user_id: int) -> Dict[str, object]:
     session = SESSIONS.setdefault(user_id, {})
-    session.setdefault("role", "admin" if is_admin(user_id) else "user")
+    session.setdefault("role", "user")
     session.setdefault("screen", "home")
     session.setdefault("page", 0)
     return session
@@ -81,8 +81,8 @@ async def send_item(message, item):
 
 async def show_main_menu(update: Update, text: str = "📚 الصفحة الرئيسية"):
     uid = update.effective_user.id
-    set_session(uid, role="admin" if is_admin(uid) else "user", screen="home", page=0)
-    await update.message.reply_text(text, reply_markup=main_menu(is_admin=is_admin(uid)))
+    set_session(uid, role="user", screen="home", page=0)
+    await update.message.reply_text(text, reply_markup=main_menu())
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -134,10 +134,10 @@ async def show_items_screen(update: Update, session: Dict[str, object], payload,
 
 async def handle_home(update: Update, session: Dict[str, object]):
     session.clear()
-    session["role"] = "admin" if is_admin(update.effective_user.id) else "user"
+    session["role"] = "user"
     session["screen"] = "home"
     session["page"] = 0
-    await update.message.reply_text("📚 الصفحة الرئيسية", reply_markup=main_menu(is_admin=is_admin(update.effective_user.id)))
+    await update.message.reply_text("📚 الصفحة الرئيسية", reply_markup=main_menu())
 
 
 async def handle_back(update: Update, session: Dict[str, object], payload):
@@ -197,7 +197,7 @@ async def handle_back(update: Update, session: Dict[str, object], payload):
 
     if screen == "user_category":
         set_session(uid, screen="home", page=0)
-        await update.message.reply_text("اختر القسم من القائمة:", reply_markup=main_menu(is_admin=is_admin(uid)))
+        await update.message.reply_text("اختر القسم من القائمة:", reply_markup=main_menu())
         return
 
     if screen == "user_targets":
@@ -221,11 +221,6 @@ async def handle_user_text(update: Update, session: Dict[str, object], payload, 
     screen = session.get("screen", "home")
     uid = update.effective_user.id
 
-    if text == "🛠️ لوحة التحكم" and is_admin(uid):
-        set_session(uid, role="admin", screen="admin_dashboard", page=0)
-        await update.message.reply_text("🛠️ لوحة التحكم", reply_markup=admin_dashboard())
-        return
-
     if text == "🎬 كرومات":
         set_session(uid, screen="user_category", category="chroma", content_type=None, page=0)
         await update.message.reply_text("🎬 قسم الكرومات", reply_markup=category_menu("chroma"))
@@ -239,12 +234,12 @@ async def handle_user_text(update: Update, session: Dict[str, object], payload, 
     if text == "🌿 مناظر طبيعية":
         items = payload["categories"]["nature"]
         if not items:
-            await update.message.reply_text("🌿 لا يوجد محتوى بعد", reply_markup=main_menu(is_admin=is_admin(uid)))
+            await update.message.reply_text("🌿 لا يوجد محتوى بعد", reply_markup=main_menu())
             return
         await update.message.reply_text("🌿 مناظر طبيعية")
         for item in items:
             await send_item(update.message, item)
-        await update.message.reply_text("اختر قسمًا آخر", reply_markup=main_menu(is_admin=is_admin(uid)))
+        await update.message.reply_text("اختر قسمًا آخر", reply_markup=main_menu())
         return
 
     if text == "📖 سور":
@@ -284,7 +279,7 @@ async def handle_user_text(update: Update, session: Dict[str, object], payload, 
         if text in targets:
             items = current_items(payload, category, content_type, text)
             if not items:
-                await update.message.reply_text(f"❌ لا يوجد محتوى لـ {text}", reply_markup=main_menu(is_admin=is_admin(uid)))
+                await update.message.reply_text(f"❌ لا يوجد محتوى لـ {text}", reply_markup=main_menu())
                 return
             set_session(uid, screen="user_content", target_name=text)
             await update.message.reply_text(f"📂 {text}\nعدد العناصر: {len(items)}")
@@ -295,7 +290,7 @@ async def handle_user_text(update: Update, session: Dict[str, object], payload, 
             await show_targets_screen(update, session, payload, title, content_type, category)
             return
 
-    await update.message.reply_text("اختر من القائمة", reply_markup=main_menu(is_admin=is_admin(uid)))
+    await update.message.reply_text("اختر من القائمة", reply_markup=main_menu())
 
 
 async def handle_admin_text(update: Update, session: Dict[str, object], payload, text: str):
