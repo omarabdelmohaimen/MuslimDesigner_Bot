@@ -1,22 +1,27 @@
 from __future__ import annotations
 
 import json
+import logging
+import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+from urllib import error, parse, request
+
+logger = logging.getLogger(__name__)
 
 SURAHS: List[str] = [
-    "الفاتحة","البقرة","آل عمران","النساء","المائدة","الأنعام","الأعراف","الأنفال","التوبة",
-    "يونس","هود","يوسف","الرعد","إبراهيم","الحجر","النحل","الإسراء","الكهف","مريم","طه",
-    "الأنبياء","الحج","المؤمنون","النور","الفرقان","الشعراء","النمل","القصص","العنكبوت",
-    "الروم","لقمان","السجدة","الأحزاب","سبأ","فاطر","يس","الصافات","ص","الزمر","غافر",
-    "فصلت","الشورى","الزخرف","الدخان","الجاثية","الأحقاف","محمد","الفتح","الحجرات","ق",
-    "الذاريات","الطور","النجم","القمر","الرحمن","الواقعة","الحديد","المجادلة","الحشر",
-    "الممتحنة","الصف","الجمعة","المنافقون","التغابن","الطلاق","التحريم","الملك","القلم",
-    "الحاقة","المعارج","نوح","الجن","المزمل","المدثر","القيامة","الإنسان","المرسلات",
-    "النبأ","النازعات","عبس","التكوير","الانفطار","المطففين","الانشقاق","البروج","الطارق",
-    "الأعلى","الغاشية","الفجر","البلد","الشمس","الليل","الضحى","الشرح","التين","العلق",
-    "القدر","البينة","الزلزلة","العاديات","القارعة","التكاثر","العصر","الهمزة","الفيل",
-    "قريش","الماعون","الكوثر","الكافرون","النصر","المسد","الإخلاص","الفلق","الناس"
+    "الفاتحة", "البقرة", "آل عمران", "النساء", "المائدة", "الأنعام", "الأعراف", "الأنفال", "التوبة",
+    "يونس", "هود", "يوسف", "الرعد", "إبراهيم", "الحجر", "النحل", "الإسراء", "الكهف", "مريم", "طه",
+    "الأنبياء", "الحج", "المؤمنون", "النور", "الفرقان", "الشعراء", "النمل", "القصص", "العنكبوت",
+    "الروم", "لقمان", "السجدة", "الأحزاب", "سبأ", "فاطر", "يس", "الصافات", "ص", "الزمر", "غافر",
+    "فصلت", "الشورى", "الزخرف", "الدخان", "الجاثية", "الأحقاف", "محمد", "الفتح", "الحجرات", "ق",
+    "الذاريات", "الطور", "النجم", "القمر", "الرحمن", "الواقعة", "الحديد", "المجادلة", "الحشر",
+    "الممتحنة", "الصف", "الجمعة", "المنافقون", "التغابن", "الطلاق", "التحريم", "الملك", "القلم",
+    "الحاقة", "المعارج", "نوح", "الجن", "المزمل", "المدثر", "القيامة", "الإنسان", "المرسلات",
+    "النبأ", "النازعات", "عبس", "التكوير", "الانفطار", "المطففين", "الانشقاق", "البروج", "الطارق",
+    "الأعلى", "الغاشية", "الفجر", "البلد", "الشمس", "الليل", "الضحى", "الشرح", "التين", "العلق",
+    "القدر", "البينة", "الزلزلة", "العاديات", "القارعة", "التكاثر", "العصر", "الهمزة", "الفيل",
+    "قريش", "الماعون", "الكوثر", "الكافرون", "النصر", "المسد", "الإخلاص", "الفلق", "الناس",
 ]
 
 DEFAULT_SHEIKHS: List[str] = [
@@ -76,14 +81,12 @@ def ensure_structure(data: Dict[str, Any]) -> Dict[str, Any]:
             if t not in categories[category] or not isinstance(categories[category].get(t), dict):
                 categories[category][t] = {}
 
-        # Normalize surah items
         for surah, items in list(categories[category]["surahs"].items()):
             if not isinstance(items, list):
                 categories[category]["surahs"][surah] = []
             else:
                 categories[category]["surahs"][surah] = [_ensure_item(x) for x in items]
 
-        # Normalize sheikh -> surah -> items
         for sheikh, value in list(categories[category]["sheikhs"].items()):
             if isinstance(value, list):
                 categories[category]["sheikhs"][sheikh] = {"عام": [_ensure_item(x) for x in value]}
@@ -112,24 +115,122 @@ def ensure_structure(data: Dict[str, Any]) -> Dict[str, Any]:
     return data
 
 
+class SupabaseBackend:
+    def __init__(self, url: str, key: str, table: str, row_id: int = 1, timeout: int = 10):
+        self.url = url.rstrip("/")
+        self.key = key
+        self.table = table.strip() or "bot_state"
+        self.row_id = int(row_id)
+        self.timeout = timeout
+
+    def _headers(self, content_type: Optional[str] = None) -> Dict[str, str]:
+        headers = {
+            "apikey": self.key,
+            "Authorization": f"Bearer {self.key}",
+            "Accept": "application/json",
+        }
+        if content_type:
+            headers["Content-Type"] = content_type
+        return headers
+
+    def _request(self, method: str, path: str, *, params: Optional[Dict[str, str]] = None, body: Optional[dict] = None) -> Any:
+        url = f"{self.url}/rest/v1/{path.lstrip('/')}"
+        if params:
+            url = f"{url}?{parse.urlencode(params)}"
+        data = None
+        headers = self._headers("application/json") if body is not None else self._headers()
+        if body is not None:
+            data = json.dumps(body, ensure_ascii=False).encode("utf-8")
+        req = request.Request(url, data=data, headers=headers, method=method)
+        with request.urlopen(req, timeout=self.timeout) as resp:
+            raw = resp.read().decode("utf-8")
+            if not raw:
+                return None
+            return json.loads(raw)
+
+    def load(self) -> Optional[Dict[str, Any]]:
+        try:
+            rows = self._request(
+                "GET",
+                self.table,
+                params={"select": "payload", "id": f"eq.{self.row_id}", "limit": "1"},
+            )
+            if isinstance(rows, list) and rows:
+                payload = rows[0].get("payload")
+                if isinstance(payload, dict):
+                    return payload
+        except Exception as exc:  # pragma: no cover - network-dependent
+            logger.warning("Supabase load failed: %s", exc)
+        return None
+
+    def save(self, data: Dict[str, Any]) -> None:
+        body = {"id": self.row_id, "payload": data}
+        try:
+            self._request(
+                "POST",
+                self.table,
+                params={"on_conflict": "id"},
+                body=body,
+            )
+        except Exception as exc:  # pragma: no cover - network-dependent
+            raise RuntimeError(f"Supabase save failed: {exc}") from exc
+
+
 class Storage:
     def __init__(self, path: Path):
         self.path = path
         self.path.parent.mkdir(parents=True, exist_ok=True)
         if not self.path.exists():
-            self.save(_copy_default())
+            self.save_local(_copy_default())
 
-    def load(self) -> Dict[str, Any]:
+        supabase_url = os.getenv("SUPABASE_URL", "").strip()
+        supabase_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "").strip() or os.getenv("SUPABASE_KEY", "").strip()
+        supabase_table = os.getenv("SUPABASE_TABLE", "bot_state").strip() or "bot_state"
+        supabase_row_id = int(os.getenv("SUPABASE_ROW_ID", "1") or 1)
+        self.backend: Optional[SupabaseBackend] = None
+        if supabase_url and supabase_key:
+            self.backend = SupabaseBackend(supabase_url, supabase_key, supabase_table, supabase_row_id)
+            logger.info("Supabase backend enabled: table=%s row_id=%s", supabase_table, supabase_row_id)
+        else:
+            logger.info("Supabase backend not configured; using local JSON only")
+
+    def load_local(self) -> Dict[str, Any]:
         if not self.path.exists():
             return _copy_default()
         with self.path.open("r", encoding="utf-8") as f:
             data = json.load(f)
         return ensure_structure(data)
 
-    def save(self, data: Dict[str, Any]) -> None:
+    def save_local(self, data: Dict[str, Any]) -> None:
         data = ensure_structure(data)
         with self.path.open("w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
+
+    def load(self) -> Dict[str, Any]:
+        local_data = self.load_local()
+        if not self.backend:
+            return local_data
+
+        remote_data = self.backend.load()
+        if remote_data is None:
+            try:
+                self.backend.save(local_data)
+            except Exception as exc:  # pragma: no cover - network-dependent
+                logger.warning("Supabase bootstrap failed: %s", exc)
+            return local_data
+
+        remote_data = ensure_structure(remote_data)
+        self.save_local(remote_data)
+        return remote_data
+
+    def save(self, data: Dict[str, Any]) -> None:
+        data = ensure_structure(data)
+        self.save_local(data)
+        if self.backend:
+            try:
+                self.backend.save(data)
+            except Exception as exc:  # pragma: no cover - network-dependent
+                logger.warning("Saving to Supabase failed, local cache kept: %s", exc)
 
     def _available_surahs(self, data: Dict[str, Any], category: str) -> List[str]:
         keys = set(data["categories"].get(category, {}).get("surahs", {}).keys())
@@ -253,7 +354,7 @@ class Storage:
             data["categories"]["nature"].append(item)
             return
         if content_type == "surahs":
-            if content_type is None or target_name is None:
+            if target_name is None:
                 return
             bucket = data["categories"][category]["surahs"].setdefault(target_name, [])
             bucket.append(item)
@@ -309,7 +410,6 @@ class Storage:
                 for item in items:
                     merged.append((surah, item))
             if 0 <= item_index < len(merged):
-                # remove from the flattened list by searching again
                 remaining = item_index
                 for surah, items in sheikh_map.items():
                     if remaining < len(items):
@@ -379,16 +479,13 @@ class Storage:
         targets = {name.strip() for name in names if name.strip()}
         if not targets:
             return removed
-        # Remove from default list
         data["settings"]["default_sheikhs"] = [name for name in current if name not in targets]
-        # Remove any stored content and visible entries from categories
         for cat in ("chroma", "designs"):
             sheikhs = data["categories"].get(cat, {}).get("sheikhs", {})
             for name in list(sheikhs.keys()):
                 if name in targets:
                     sheikhs.pop(name, None)
                     removed.append(name)
-        # Make sure all requested names are reported, even if they only existed in defaults
         for name in targets:
             if name not in removed and name in current:
                 removed.append(name)
