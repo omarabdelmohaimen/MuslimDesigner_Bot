@@ -2,30 +2,17 @@ import os
 import re
 from typing import Any, Dict, List, Optional
 
+import requests
 from dotenv import load_dotenv
-from supabase import create_client, Client
-from telegram import (
-    Update,
-    InlineKeyboardButton,
-    InlineKeyboardMarkup,
-    ReplyKeyboardMarkup,
-    ReplyKeyboardRemove,
-)
-from telegram.ext import (
-    Application,
-    CallbackQueryHandler,
-    CommandHandler,
-    ContextTypes,
-    MessageHandler,
-    filters,
-)
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, ReplyKeyboardRemove
+from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler, filters
 
 load_dotenv()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0") or 0)
-SUPABASE_URL = os.getenv("SUPABASE_URL", "").strip()
-SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "").strip()
+SUPABASE_URL = os.getenv("SUPABASE_URL", "").strip().rstrip("/")
+SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "").strip()
 
 SURAH_LIST = [
     ("الفاتحة", 1), ("البقرة", 2), ("آل عمران", 3), ("النساء", 4), ("المائدة", 5), ("الأنعام", 6),
@@ -49,165 +36,143 @@ SURAH_LIST = [
     ("الكافرون", 109), ("النصر", 110), ("المسد", 111), ("الإخلاص", 112), ("الفلق", 113), ("الناس", 114),
 ]
 
-if not BOT_TOKEN or not ADMIN_ID or not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
+if not BOT_TOKEN or not ADMIN_ID or not SUPABASE_URL or not SUPABASE_KEY:
     raise RuntimeError("Missing env vars: BOT_TOKEN, ADMIN_ID, SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY")
 
-sb: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
 state: Dict[int, Dict[str, Any]] = {}
 
-# ---------- DB bootstrap ----------
+def headers() -> Dict[str, str]:
+    return {
+        "apikey": SUPABASE_KEY,
+        "Authorization": f"Bearer {SUPABASE_KEY}",
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+    }
 
-def seed_surahs_if_needed() -> None:
-    try:
-        first = sb.table("surahs").select("id").limit(1).execute().data or []
-    except Exception as exc:
-        raise RuntimeError("Supabase tables are missing. Run supabase_schema.sql first.") from exc
-    if first:
+def api_request(method: str, table: str, params: Optional[Dict[str, str]] = None, json_body: Any = None, return_rep: bool = False):
+    url = f"{SUPABASE_URL}/rest/v1/{table}"
+    h = headers()
+    if return_rep:
+        h["Prefer"] = "return=representation"
+    resp = requests.request(method, url, headers=h, params=params, json=json_body, timeout=30)
+    resp.raise_for_status()
+    if resp.text.strip():
+        return resp.json()
+    return None
+
+def select_rows(table: str, columns: str = "*", filters: Optional[List[tuple]] = None, order: Optional[str] = None, limit: Optional[int] = None):
+    params: Dict[str, str] = {"select": columns}
+    if filters:
+        for col, op, value in filters:
+            params[col] = f"{op}.{value}"
+    if order:
+        params["order"] = order
+    if limit is not None:
+        params["limit"] = str(limit)
+    return api_request("GET", table, params=params) or []
+
+def insert_rows(table: str, payload: Any):
+    return api_request("POST", table, json_body=payload)
+
+def delete_rows(table: str, filters: List[tuple]):
+    params: Dict[str, str] = {}
+    for col, op, value in filters:
+        params[col] = f"{op}.{value}"
+    return api_request("DELETE", table, params=params)
+
+def seed_surahs_if_needed():
+    if select_rows("surahs", "id", limit=1):
         return
-    payload = [{"id": sid, "name": name} for name, sid in SURAH_LIST]
-    sb.table("surahs").insert(payload).execute()
-
-def _fetch(table: str, select: str = "*", **filters):
-    q = sb.table(table).select(select)
-    for k, v in filters.items():
-        if v is None:
-            continue
-        q = q.eq(k, v)
-    return q.execute().data or []
-
-def _fetch_one(table: str, select: str = "*", **filters):
-    rows = _fetch(table, select, **filters)
-    return rows[0] if rows else None
-
-def _insert(table: str, payload: Dict[str, Any]) -> None:
-    sb.table(table).insert(payload).execute()
-
-# ---------- keyboards ----------
+    insert_rows("surahs", [{"id": sid, "name": name} for name, sid in SURAH_LIST])
 
 def main_menu() -> ReplyKeyboardMarkup:
-    return ReplyKeyboardMarkup(
-        [["كرومات", "تصاميم"], ["مناظر طبيعية", "بحث في السور"]],
-        resize_keyboard=True,
-        input_field_placeholder="اختر من القائمة",
-    )
+    return ReplyKeyboardMarkup([["كرومات", "تصاميم"], ["مناظر طبيعية", "بحث في السور"]], resize_keyboard=True, input_field_placeholder="اختر من القائمة")
 
 def admin_menu() -> ReplyKeyboardMarkup:
-    return ReplyKeyboardMarkup(
-        [["إضافة محتوى", "إضافة شيخ"], ["حذف شيخ", "إحصائيات"], ["رجوع"]],
-        resize_keyboard=True,
-        input_field_placeholder="لوحة التحكم",
-    )
+    return ReplyKeyboardMarkup([["إضافة محتوى", "إضافة شيخ"], ["حذف شيخ", "إحصائيات"], ["رجوع"]], resize_keyboard=True)
 
 def upload_menu() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup([["إنهاء"], ["رجوع"]], resize_keyboard=True)
 
-def section_inline(section: str) -> InlineKeyboardMarkup:
+def inline_sections() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("سور", callback_data=f"browse|{section}|surah|0")],
-        [InlineKeyboardButton("شيوخ", callback_data=f"browse|{section}|sheikh|0")],
-        [InlineKeyboardButton("عشوائي", callback_data=f"browse|{section}|random|0")],
-        [InlineKeyboardButton("رجوع", callback_data="back|home")],
+        [InlineKeyboardButton("كرومات", callback_data="admin_section|chroma")],
+        [InlineKeyboardButton("تصاميم", callback_data="admin_section|designs")],
+        [InlineKeyboardButton("مناظر طبيعية", callback_data="admin_section|nature")],
+        [InlineKeyboardButton("رجوع", callback_data="back_admin")],
     ])
 
-def admin_sections_inline() -> InlineKeyboardMarkup:
+def inline_types(section: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("كرومات", callback_data="admin|section|chroma")],
-        [InlineKeyboardButton("تصاميم", callback_data="admin|section|designs")],
-        [InlineKeyboardButton("مناظر طبيعية", callback_data="admin|section|nature")],
-        [InlineKeyboardButton("رجوع", callback_data="back|admin")],
+        [InlineKeyboardButton("سور", callback_data=f"admin_type|{section}|surah")],
+        [InlineKeyboardButton("شيوخ", callback_data=f"admin_type|{section}|sheikh")],
+        [InlineKeyboardButton("عشوائي", callback_data=f"admin_type|{section}|random")],
+        [InlineKeyboardButton("رجوع", callback_data="back_admin_sections")],
     ])
 
-def admin_type_inline(section: str) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("سور", callback_data=f"admin|type|{section}|surah")],
-        [InlineKeyboardButton("شيوخ", callback_data=f"admin|type|{section}|sheikh")],
-        [InlineKeyboardButton("عشوائي", callback_data=f"admin|type|{section}|random")],
-        [InlineKeyboardButton("رجوع", callback_data="back|admin_sections")],
-    ])
-
-def make_paged_keyboard(items: List[Dict[str, Any]], item_prefix: str, page_prefix: str, page: int, back_cb: str, per_page: int = 9) -> InlineKeyboardMarkup:
+def paginated_kb(items: List[Dict[str, Any]], cb_prefix: str, page: int, back_cb: str, per_page: int = 9) -> InlineKeyboardMarkup:
     start = page * per_page
     end = start + per_page
-    page_items = items[start:end]
     rows = []
-    for item in page_items:
-        rows.append([InlineKeyboardButton(item["label"], callback_data=f"sel|{item_prefix}|{item['id']}")])
+    for item in items[start:end]:
+        rows.append([InlineKeyboardButton(item["label"], callback_data=f"{cb_prefix}|{item['id']}")])
     nav = []
     if page > 0:
-        nav.append(InlineKeyboardButton("السابق", callback_data=f"page|{page_prefix}|{page-1}"))
+        nav.append(InlineKeyboardButton("السابق", callback_data=f"{cb_prefix}_page|{page-1}"))
     if end < len(items):
-        nav.append(InlineKeyboardButton("التالي", callback_data=f"page|{page_prefix}|{page+1}"))
+        nav.append(InlineKeyboardButton("التالي", callback_data=f"{cb_prefix}_page|{page+1}"))
     if nav:
         rows.append(nav)
     rows.append([InlineKeyboardButton("رجوع", callback_data=back_cb)])
     return InlineKeyboardMarkup(rows)
 
-# ---------- item queries ----------
+def all_surahs() -> List[Dict[str, Any]]:
+    return [{"id": r["id"], "label": f"{r['id']}. {r['name']}"} for r in select_rows("surahs", "id,name", order="id.asc")]
 
-def all_surah_items() -> List[Dict[str, Any]]:
-    rows = _fetch("surahs", "id,name")
-    return [{"id": r["id"], "label": f"{r['id']}. {r['name']}"} for r in rows]
+def all_sheikhs() -> List[Dict[str, Any]]:
+    return [{"id": r["id"], "label": r["name"]} for r in select_rows("sheikhs", "id,name", order="name.asc")]
 
-def all_sheikh_items() -> List[Dict[str, Any]]:
-    rows = _fetch("sheikhs", "id,name")
-    return [{"id": r["id"], "label": r["name"]} for r in rows]
-
-def available_surah_items(section: str) -> List[Dict[str, Any]]:
-    media = _fetch("media", "surah_id", section=section, category="surah")
-    ids = sorted({m["surah_id"] for m in media if m.get("surah_id") is not None})
-    rows = _fetch("surahs", "id,name")
-    lookup = {r["id"]: r["name"] for r in rows}
+def available_surahs(section: str) -> List[Dict[str, Any]]:
+    media = select_rows("media", "surah_id", filters=[("section", "eq", section), ("category", "eq", "surah")], order="surah_id.asc")
+    ids = sorted({r["surah_id"] for r in media if r.get("surah_id") is not None})
+    lookup = {r["id"]: r["name"] for r in select_rows("surahs", "id,name", order="id.asc")}
     return [{"id": sid, "label": f"{sid}. {lookup[sid]}"} for sid in ids if sid in lookup]
 
-def available_sheikh_items(section: str) -> List[Dict[str, Any]]:
-    media = _fetch("media", "sheikh_id", section=section, category="sheikh")
-    ids = sorted({m["sheikh_id"] for m in media if m.get("sheikh_id") is not None})
-    rows = _fetch("sheikhs", "id,name")
-    lookup = {r["id"]: r["name"] for r in rows}
+def available_sheikhs(section: str) -> List[Dict[str, Any]]:
+    media = select_rows("media", "sheikh_id", filters=[("section", "eq", section), ("category", "eq", "sheikh")], order="sheikh_id.asc")
+    ids = sorted({r["sheikh_id"] for r in media if r.get("sheikh_id") is not None})
+    lookup = {r["id"]: r["name"] for r in select_rows("sheikhs", "id,name", order="name.asc")}
     return [{"id": sid, "label": lookup[sid]} for sid in ids if sid in lookup]
 
-def get_media(section: str, category: str, item_id: Optional[int] = None) -> List[Dict[str, Any]]:
-    q = sb.table("media").select("file_id,file_kind")
-    q = q.eq("section", section).eq("category", category)
+def get_media(section: str, category: str, item_id: Optional[int] = None):
+    filters = [("section", "eq", section), ("category", "eq", category)]
     if category == "surah" and item_id is not None:
-        q = q.eq("surah_id", item_id)
+        filters.append(("surah_id", "eq", item_id))
     elif category == "sheikh" and item_id is not None:
-        q = q.eq("sheikh_id", item_id)
-    return q.order("id").execute().data or []
+        filters.append(("sheikh_id", "eq", item_id))
+    return select_rows("media", "file_id,file_kind", filters=filters, order="id.asc")
 
-def add_media(section: str, category: str, file_id: str, file_kind: str, item_id: Optional[int] = None) -> None:
-    payload: Dict[str, Any] = {
-        "section": section,
-        "category": category,
-        "file_id": file_id,
-        "file_kind": file_kind,
-        "caption": None,
-    }
+def add_media(section: str, category: str, file_id: str, file_kind: str, item_id: Optional[int] = None):
+    payload = {"section": section, "category": category, "file_id": file_id, "file_kind": file_kind, "caption": None}
     if category == "surah":
         payload["surah_id"] = item_id
     elif category == "sheikh":
         payload["sheikh_id"] = item_id
-    _insert("media", payload)
+    insert_rows("media", payload)
 
-def delete_sheikh(sheikh_id: int) -> None:
-    sb.table("media").delete().eq("sheikh_id", sheikh_id).execute()
-    sb.table("sheikhs").delete().eq("id", sheikh_id).execute()
+def delete_sheikh(sheikh_id: int):
+    delete_rows("media", [("sheikh_id", "eq", sheikh_id)])
+    delete_rows("sheikhs", [("id", "eq", sheikh_id)])
 
-# ---------- sending media ----------
-
-async def send_item_media(message, media_row: Dict[str, Any], caption: Optional[str] = None):
-    kind = media_row["file_kind"]
-    file_id = media_row["file_id"]
-    if kind == "photo":
-        await message.reply_photo(file_id, caption=caption)
-    elif kind == "video":
-        await message.reply_video(file_id, caption=caption)
-    elif kind == "document":
-        await message.reply_document(file_id, caption=caption)
+async def send_media(message, row, caption=None):
+    if row["file_kind"] == "photo":
+        await message.reply_photo(row["file_id"], caption=caption or None)
+    elif row["file_kind"] == "video":
+        await message.reply_video(row["file_id"], caption=caption or None)
+    elif row["file_kind"] == "document":
+        await message.reply_document(row["file_id"], caption=caption or None)
     else:
         await message.reply_text(caption or "نوع ملف غير مدعوم")
-
-# ---------- commands ----------
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     state.pop(update.effective_user.id, None)
@@ -219,32 +184,42 @@ async def admin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     state[ADMIN_ID] = {"mode": "admin_home"}
     await update.message.reply_text("لوحة التحكم", reply_markup=admin_menu())
 
-# ---------- text router ----------
-
 async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     text = (update.message.text or "").strip()
+    s = state.get(uid, {})
 
     if text == "كرومات":
-        await update.message.reply_text("اختر", reply_markup=section_inline("chroma"))
+        await update.message.reply_text("اختر", reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("سور", callback_data="browse|chroma|surah|0")],
+            [InlineKeyboardButton("شيوخ", callback_data="browse|chroma|sheikh|0")],
+            [InlineKeyboardButton("عشوائي", callback_data="browse|chroma|random|0")],
+            [InlineKeyboardButton("رجوع", callback_data="back_home")],
+        ]))
         return
+
     if text == "تصاميم":
-        await update.message.reply_text("اختر", reply_markup=section_inline("designs"))
+        await update.message.reply_text("اختر", reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("سور", callback_data="browse|designs|surah|0")],
+            [InlineKeyboardButton("شيوخ", callback_data="browse|designs|sheikh|0")],
+            [InlineKeyboardButton("عشوائي", callback_data="browse|designs|random|0")],
+            [InlineKeyboardButton("رجوع", callback_data="back_home")],
+        ]))
         return
+
     if text == "مناظر طبيعية":
-        rows = get_media("nature", "nature")
+        rows = select_rows("media", "file_id,file_kind", filters=[("section", "eq", "nature"), ("category", "eq", "nature")], order="id.asc")
         if not rows:
             await update.message.reply_text("لا يوجد محتوى بعد")
             return
         for row in rows:
-            await send_item_media(update.message, row, "مناظر طبيعية")
+            await send_media(update.message, row, "مناظر طبيعية")
         return
+
     if text == "بحث في السور":
         state[uid] = {"mode": "search_surah"}
         await update.message.reply_text("اكتب اسم السورة أو جزء منه")
         return
-
-    s = state.get(uid, {})
 
     if uid == ADMIN_ID and text == "رجوع":
         state[uid] = {"mode": "admin_home"}
@@ -252,38 +227,36 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if uid == ADMIN_ID and text == "إضافة محتوى":
-        state[uid] = {"mode": "admin_add_content"}
-        await update.message.reply_text("اختر القسم", reply_markup=admin_sections_inline())
+        state[uid] = {"mode": "pick_section"}
+        await update.message.reply_text("اختر القسم", reply_markup=inline_sections())
         return
 
     if uid == ADMIN_ID and text == "إضافة شيخ":
-        state[uid] = {"mode": "admin_add_sheikh_name"}
+        state[uid] = {"mode": "add_sheikh"}
         await update.message.reply_text("اكتب اسم الشيخ أو عدة أسماء في سطور منفصلة", reply_markup=ReplyKeyboardRemove())
         return
 
     if uid == ADMIN_ID and text == "حذف شيخ":
-        rows = all_sheikh_items()
+        rows = all_sheikhs()
         if not rows:
             await update.message.reply_text("لا يوجد شيوخ")
             return
-        await update.message.reply_text("اختر الشيخ للحذف", reply_markup=make_paged_keyboard(rows, "delete_sheikh", "delete_sheikh", 0, "back|admin"))
+        await update.message.reply_text("اختر الشيخ للحذف", reply_markup=paginated_kb(rows, "delete_sheikh", 0, "back_admin"))
         return
 
     if uid == ADMIN_ID and text == "إحصائيات":
-        media_count = len(_fetch("media", "id"))
-        sheikh_count = len(_fetch("sheikhs", "id"))
-        surah_count = len(available_surah_items("chroma")) + len(available_surah_items("designs"))
-        await update.message.reply_text(
-            f"""إحصائيات\nالمحتوى: {media_count}\nالشيوخ: {sheikh_count}\nالسور المستخدمة: {surah_count}"""
-        )
+        await update.message.reply_text(f"إحصائيات\nالمحتوى: {len(select_rows('media', 'id'))}\nالشيوخ: {len(select_rows('sheikhs', 'id'))}")
         return
 
-    if uid == ADMIN_ID and s.get("mode") == "admin_add_sheikh_name":
+    if uid == ADMIN_ID and s.get("mode") == "add_sheikh":
         names = [n.strip() for n in re.split(r"[\n,]+", text) if n.strip()]
+        existing = {r["name"] for r in select_rows("sheikhs", "name", order="name.asc")}
         added = 0
         for name in names:
+            if name in existing:
+                continue
             try:
-                _insert("sheikhs", {"name": name})
+                insert_rows("sheikhs", {"name": name})
                 added += 1
             except Exception:
                 pass
@@ -293,56 +266,47 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if s.get("mode") == "search_surah":
         query = text.lower()
-        rows = _fetch("surahs", "id,name")
-        available = set(item["id"] for item in available_surah_items("chroma") + available_surah_items("designs"))
-        matches = [{"id": r["id"], "label": f"{r['id']}. {r['name']}"} for r in rows if r["id"] in available and query in r["name"].lower()]
+        used_ids = {r["surah_id"] for r in select_rows("media", "surah_id", filters=[("category", "eq", "surah")]) if r.get("surah_id") is not None}
+        matches = [{"id": sid, "label": f"{sid}. {name}"} for name, sid in SURAH_LIST if sid in used_ids and query in name.lower()]
         if not matches:
             await update.message.reply_text("لا توجد نتائج")
-            return
-        await update.message.reply_text("النتائج", reply_markup=make_paged_keyboard(matches, "search_pick", "search_pick", 0, "back|home"))
+        else:
+            await update.message.reply_text("النتائج", reply_markup=paginated_kb(matches, "pick_search_surah", 0, "back_home"))
         return
 
-    if uid == ADMIN_ID and text in {"إنهاء", "رجوع"}:
+    if uid == ADMIN_ID and text in {"إنهاء", "رجوع"} and s.get("mode", "").startswith("upload"):
         state[uid] = {"mode": "admin_home"}
         await update.message.reply_text("لوحة التحكم", reply_markup=admin_menu())
         return
-
-# ---------- upload router ----------
 
 async def on_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     if uid != ADMIN_ID:
         return
     s = state.get(uid, {})
-    if s.get("mode") not in {"admin_upload", "admin_upload_nature", "admin_upload_random"}:
+    if s.get("mode") not in {"upload", "upload_nature", "upload_random"}:
         return
 
     msg = update.effective_message
     file_id = None
     file_kind = None
     if msg.photo:
-        file_id = msg.photo[-1].file_id
-        file_kind = "photo"
+        file_id, file_kind = msg.photo[-1].file_id, "photo"
     elif msg.video:
-        file_id = msg.video.file_id
-        file_kind = "video"
+        file_id, file_kind = msg.video.file_id, "video"
     elif msg.document:
-        file_id = msg.document.file_id
-        file_kind = "document"
-
-    if not file_id:
+        file_id, file_kind = msg.document.file_id, "document"
+    else:
         return
 
-    if s["mode"] == "admin_upload_nature":
+    if s["mode"] == "upload_nature":
         add_media("nature", "nature", file_id, file_kind)
-    elif s["mode"] == "admin_upload_random":
+    elif s["mode"] == "upload_random":
         add_media(s["section"], "random", file_id, file_kind)
     else:
         add_media(s["section"], s["category"], file_id, file_kind, s.get("item_id"))
 
     await msg.reply_text("تم الحفظ", reply_markup=upload_menu())
-
-# ---------- callbacks ----------
 
 async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
@@ -350,179 +314,150 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = q.from_user.id
     data = q.data or ""
 
-    if data == "back|home":
+    if data == "back_home":
         state.pop(uid, None)
         await q.message.reply_text("أهلا بك", reply_markup=main_menu())
         return
 
-    if data == "back|admin":
+    if data == "back_admin":
         state[uid] = {"mode": "admin_home"}
         await q.message.reply_text("لوحة التحكم", reply_markup=admin_menu())
         return
 
-    if data == "back|admin_sections":
-        state[uid] = {"mode": "admin_add_content"}
-        await q.edit_message_text("اختر القسم", reply_markup=admin_sections_inline())
+    if data == "back_admin_sections":
+        state[uid] = {"mode": "pick_section"}
+        await q.edit_message_text("اختر القسم", reply_markup=inline_sections())
         return
 
-    if data.startswith("page|"):
-        _, view, section, category, page_s = data.split("|")
-        page = int(page_s)
-
-        if view == "browse":
-            if category == "surah":
-                items = available_surah_items(section)
-            elif category == "sheikh":
-                items = available_sheikh_items(section)
-            else:
-                items = [{"id": 0, "label": "عشوائي"}] if get_media(section, "random") else []
-            if not items:
-                await q.edit_message_text("لا يوجد محتوى متاح")
-                return
-            await q.edit_message_text("اختر", reply_markup=make_paged_keyboard(items, f"sel|browse|{section}|{category}", f"browse|{section}|{category}", page, f"browse|{section}|{category}|0"))
-            return
-
-        if view == "adminpick":
-            if category == "surah":
-                items = all_surah_items()
-            elif category == "sheikh":
-                items = all_sheikh_items()
-            else:
-                items = []
-            if not items:
-                await q.edit_message_text("لا توجد عناصر")
-                return
-            await q.edit_message_text("اختر", reply_markup=make_paged_keyboard(items, f"sel|admin|{section}|{category}", f"adminpick|{section}|{category}", page, "back|admin_sections"))
-            return
-
-        if view == "delete_sheikh":
-            items = all_sheikh_items()
-            if not items:
-                await q.edit_message_text("لا يوجد شيوخ")
-                return
-            await q.edit_message_text("اختر الشيخ للحذف", reply_markup=make_paged_keyboard(items, "delete_sheikh", "delete_sheikh", page, "back|admin"))
-            return
-
-        if view == "search_pick":
-            # search uses available surahs only; same as browse selection
-            items = [{"id": sid, "label": f"{sid}. {name}"} for name, sid in SURAH_LIST]
-            await q.edit_message_text("اختر", reply_markup=make_paged_keyboard(items, "search_pick", "search_pick", page, "back|home"))
-            return
-
-    if data.startswith("browse|"):
-        _, section, category, page_s = data.split("|")
-        page = int(page_s)
-        if category == "surah":
-            items = available_surah_items(section)
-        elif category == "sheikh":
-            items = available_sheikh_items(section)
-        else:
-            items = [{"id": 0, "label": "عشوائي"}] if get_media(section, "random") else []
-        if not items:
-            await q.edit_message_text("لا يوجد محتوى متاح")
-            return
-        await q.edit_message_text("اختر", reply_markup=make_paged_keyboard(items, f"sel|browse|{section}|{category}", f"browse|{section}|{category}", page, f"back|home"))
+    if data == "add_new_sheikh":
+        state[uid] = {"mode": "add_sheikh"}
+        await q.message.reply_text("اكتب اسم الشيخ أو عدة أسماء في سطور منفصلة", reply_markup=ReplyKeyboardRemove())
         return
 
-    if data.startswith("admin|section|"):
-        section = data.split("|")[-1]
-        s = state.setdefault(uid, {})
-        s["mode"] = "admin_add_content"
-        s["section"] = section
+    if data.startswith("admin_section|"):
+        section = data.split("|", 1)[1]
+        state[uid] = {"mode": "pick_type", "section": section}
         if section == "nature":
-            s["mode"] = "admin_upload_nature"
-            await q.edit_message_text("أرسل الملفات الآن", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("رجوع", callback_data="back|admin")]]))
-            return
-        await q.edit_message_text("اختر النوع", reply_markup=admin_type_inline(section))
+            state[uid]["mode"] = "upload_nature"
+            await q.edit_message_text("أرسل الملفات الآن", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("رجوع", callback_data="back_admin")]]))
+        else:
+            await q.edit_message_text("اختر النوع", reply_markup=inline_types(section))
         return
 
-    if data.startswith("admin|type|"):
-        _, _, section, category = data.split("|")
+    if data.startswith("admin_type|"):
+        _, section, category = data.split("|")
         s = state.setdefault(uid, {})
         s["section"] = section
         s["category"] = category
         if category == "random":
-            s["mode"] = "admin_upload_random"
-            await q.edit_message_text("أرسل الملفات الآن", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("رجوع", callback_data="back|admin_sections")]]))
+            s["mode"] = "upload_random"
+            await q.edit_message_text("أرسل الملفات الآن", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("رجوع", callback_data="back_admin_sections")]]))
             return
+        items = all_surahs() if category == "surah" else all_sheikhs()
+        if category == "sheikh" and not items:
+            await q.edit_message_text("لا يوجد شيوخ. أضف شيخًا أولًا", reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("إضافة شيخ جديد", callback_data="add_new_sheikh")],
+                [InlineKeyboardButton("رجوع", callback_data="back_admin_sections")],
+            ]))
+            return
+        await q.edit_message_text("اختر", reply_markup=paginated_kb(items, f"admin_pick|{section}|{category}", 0, "back_admin_sections"))
+        return
 
-        s["mode"] = "admin_pick_item"
+    if data.startswith("admin_pick|"):
+        _, section, category, item_id = data.split("|")
+        item_id = int(item_id)
+        s = state.setdefault(uid, {})
+        s["mode"] = "upload"
+        s["section"] = section
+        s["category"] = category
+        s["item_id"] = item_id
+
+        label = ""
         if category == "surah":
-            items = all_surah_items()
+            row = select_rows("surahs", "name", filters=[("id", "eq", item_id)], limit=1)
+            label = row[0]["name"] if row else ""
         else:
-            items = all_sheikh_items()
-        if not items:
-            if category == "sheikh":
-                await q.edit_message_text("لا يوجد شيوخ. أضف شيخًا أولًا", reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("إضافة شيخ جديد", callback_data="admin|add_sheikh_new")],
-                    [InlineKeyboardButton("رجوع", callback_data="back|admin_sections")],
-                ]))
+            row = select_rows("sheikhs", "name", filters=[("id", "eq", item_id)], limit=1)
+            label = row[0]["name"] if row else ""
+        await q.edit_message_text(f"أرسل الوسائط الآن لـ {label}", reply_markup=upload_menu())
+        return
+
+    if data.startswith("browse|"):
+        _, section, category, _page = data.split("|")
+        if category == "surah":
+            items = available_surahs(section)
+        elif category == "sheikh":
+            items = available_sheikhs(section)
+        else:
+            rows = get_media(section, "random")
+            if not rows:
+                await q.edit_message_text("لا يوجد محتوى متاح")
                 return
-            await q.edit_message_text("لا توجد عناصر")
+            await q.edit_message_text("المحتوى العشوائي")
+            for row in rows:
+                await send_media(q.message, row, "عشوائي")
             return
-        await q.edit_message_text("اختر", reply_markup=make_paged_keyboard(items, f"sel|admin|{section}|{category}", f"adminpick|{section}|{category}", 0, "back|admin_sections"))
+        if not items:
+            await q.edit_message_text("لا يوجد محتوى متاح")
+            return
+        await q.edit_message_text("اختر", reply_markup=paginated_kb(items, f"pick|{section}|{category}", 0, "back_home"))
         return
 
-    if data == "admin|add_sheikh_new":
-        state[uid] = {"mode": "admin_add_sheikh_name"}
-        await q.message.reply_text("اكتب اسم الشيخ أو عدة أسماء في سطور منفصلة", reply_markup=ReplyKeyboardRemove())
-        return
-
-    if data.startswith("sel|"):
-        _, target, section, category, item_id_s = data.split("|")
-        item_id = int(item_id_s)
-
-        if target == "browse":
-            media = get_media(section, category, item_id if item_id else None)
-            if not media:
+    if data.startswith("pick_search_surah"):
+        parts = data.split("|")
+        if len(parts) == 2:
+            sid = int(parts[1])
+            rows = get_media("chroma", "surah", sid) + get_media("designs", "surah", sid)
+            if not rows:
                 await q.edit_message_text("لا يوجد محتوى")
                 return
-            if category == "surah":
-                name = _fetch_one("surahs", "name", id=item_id)["name"]
-            elif category == "sheikh":
-                name = _fetch_one("sheikhs", "name", id=item_id)["name"]
-            else:
-                name = "عشوائي"
+            name = next((n for n, i in SURAH_LIST if i == sid), "سورة")
             await q.edit_message_text(f"المحتوى: {name}")
-            for row in media:
-                await send_item_media(q.message, row, name)
-            return
+            for row in rows:
+                await send_media(q.message, row, name)
+        return
 
-        if target == "admin":
-            s = state.setdefault(uid, {})
-            s["mode"] = "admin_upload"
-            s["section"] = section
-            s["category"] = category
-            s["item_id"] = item_id
-            label = ""
-            if category == "surah":
-                label = (_fetch_one("surahs", "name", id=item_id) or {}).get("name", "")
-            else:
-                label = (_fetch_one("sheikhs", "name", id=item_id) or {}).get("name", "")
-            await q.edit_message_text(f"أرسل الوسائط الآن لـ {label}", reply_markup=upload_menu())
+    if data.startswith("pick|"):
+        _, section, category, item_id = data.split("|")
+        item_id = int(item_id)
+        media = get_media(section, category, item_id if item_id else None)
+        if not media:
+            await q.edit_message_text("لا يوجد محتوى")
             return
+        if category == "surah":
+            row = select_rows("surahs", "name", filters=[("id", "eq", item_id)], limit=1)
+            label = row[0]["name"] if row else "سورة"
+        elif category == "sheikh":
+            row = select_rows("sheikhs", "name", filters=[("id", "eq", item_id)], limit=1)
+            label = row[0]["name"] if row else "شيخ"
+        else:
+            label = "عشوائي"
+        await q.edit_message_text(f"المحتوى: {label}")
+        for row in media:
+            await send_media(q.message, row, label)
+        return
 
-    if data.startswith("delete_sheikh"):
-        # callback structure: delete_sheikh:<id> OR page|delete_sheikh|... handled above
-        parts = data.split(":")
-        if len(parts) == 2:
-            sheikh_id = int(parts[1])
-            delete_sheikh(sheikh_id)
-            state[uid] = {"mode": "admin_home"}
-            await q.message.reply_text("تم الحذف", reply_markup=admin_menu())
-            return
+    if data.startswith("delete_sheikh_page|"):
+        page = int(data.split("|")[1])
+        rows = all_sheikhs()
+        await q.edit_message_text("اختر الشيخ للحذف", reply_markup=paginated_kb(rows, "delete_sheikh", page, "back_admin"))
+        return
 
-def register(app: Application):
+    if data.startswith("delete_sheikh|"):
+        sid = int(data.split("|")[1])
+        delete_sheikh(sid)
+        state[uid] = {"mode": "admin_home"}
+        await q.message.reply_text("تم الحذف", reply_markup=admin_menu())
+        return
+
+async def main():
+    seed_surahs_if_needed()
+    app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("admin", admin_cmd))
     app.add_handler(CallbackQueryHandler(on_callback))
     app.add_handler(MessageHandler(filters.PHOTO | filters.VIDEO | filters.Document.ALL, on_media))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
-
-def main():
-    seed_surahs_if_needed()
-    app = Application.builder().token(BOT_TOKEN).build()
-    register(app)
     app.run_polling()
 
 if __name__ == "__main__":
